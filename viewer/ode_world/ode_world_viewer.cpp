@@ -12,15 +12,24 @@
 #include <iostream>
 #include <memory>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace {
 
 std::unique_ptr<xdpg::physics::OdeWorld> g_world;
 std::uint32_t g_input_sequence = 0;
-bool g_move_forward = false;
-bool g_move_backward = false;
-bool g_move_left = false;
-bool g_move_right = false;
-bool g_boost = false;
+bool g_previous_boost_down = false;
+
+bool IsKeyDown(int key) {
+#if defined(_WIN32)
+    return (GetAsyncKeyState(key) & 0x8000) != 0;
+#else
+    (void)key;
+    return false;
+#endif
+}
 
 xdpg::physics::InputCommand BuildInputCommand() {
     xdpg::physics::InputCommand input;
@@ -28,9 +37,18 @@ xdpg::physics::InputCommand BuildInputCommand() {
 
     // 项目物理世界使用游戏常见坐标：Y 轴向上，X/Z 为水平面。
     // drawstuff 自身文档按 Z 轴向上理解，所以渲染时会做坐标转换。
-    input.move_x = (g_move_right ? 1.0 : 0.0) - (g_move_left ? 1.0 : 0.0);
-    input.move_z = (g_move_forward ? 1.0 : 0.0) - (g_move_backward ? 1.0 : 0.0);
-    input.buttons = g_boost ? 1u : 0u;
+    // drawstuff 的 command 回调没有 key-up 事件，所以 Windows 本地 viewer
+    // 每帧轮询真实键盘状态：按住才移动，松开就停止继续施力。
+    input.move_x = (IsKeyDown('D') ? 1.0 : 0.0) - (IsKeyDown('A') ? 1.0 : 0.0);
+    input.move_z = (IsKeyDown('W') ? 1.0 : 0.0) - (IsKeyDown('S') ? 1.0 : 0.0);
+
+#if defined(_WIN32)
+    const bool boost_down = IsKeyDown(VK_SPACE);
+#else
+    const bool boost_down = false;
+#endif
+    input.buttons = (boost_down && !g_previous_boost_down) ? 1u : 0u;
+    g_previous_boost_down = boost_down;
     return input;
 }
 
@@ -110,7 +128,7 @@ void Start() {
     static float hpr[3] = {130.0f, -24.0f, 0.0f};
     dsSetViewpoint(xyz, hpr);
     std::cout << "XDPGate ODE world viewer\n"
-              << "按 W/A/S/D 控制蓝色 player cube，按 Space 触发 boost，按 Q 或 Esc 退出。\n";
+              << "Hold W/A/S/D to move, tap Space to boost, press Q or Esc to quit.\n";
 }
 
 void Step(int pause) {
@@ -132,17 +150,7 @@ void Step(int pause) {
 
 void Command(int cmd) {
     const char key = static_cast<char>(std::tolower(cmd));
-    if (key == 'w') {
-        g_move_forward = !g_move_forward;
-    } else if (key == 's') {
-        g_move_backward = !g_move_backward;
-    } else if (key == 'a') {
-        g_move_left = !g_move_left;
-    } else if (key == 'd') {
-        g_move_right = !g_move_right;
-    } else if (cmd == ' ') {
-        g_boost = !g_boost;
-    } else if (key == 'q' || cmd == 27) {
+    if (key == 'q' || cmd == 27) {
         std::exit(0);
     }
 }

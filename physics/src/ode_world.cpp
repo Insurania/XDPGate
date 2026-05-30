@@ -16,10 +16,14 @@ constexpr double kPlayerCubeSize = 1.0;
 constexpr double kSmallCubeSize = 0.55;
 constexpr double kPlayerMass = 5.0;
 constexpr double kSmallCubeMass = 1.0;
-constexpr double kMoveForce = 85.0;
-constexpr double kBoostImpulse = 1.8;
+constexpr double kMoveForce = 28.0;
+constexpr double kBoostImpulse = 0.8;
 constexpr std::uint32_t kBoostButtonMask = 1u << 0u;
 constexpr int kMaxContactsPerPair = 8;
+constexpr double kPlayerLinearDamping = 0.08;
+constexpr double kPlayerAngularDamping = 0.10;
+constexpr double kSmallCubeLinearDamping = 0.02;
+constexpr double kSmallCubeAngularDamping = 0.04;
 
 double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
@@ -151,6 +155,8 @@ void OdeWorld::CreateWorld() {
     dWorldSetCFM(world_, 1e-5);
     dWorldSetERP(world_, 0.2);
     dWorldSetQuickStepNumIterations(world_, 24);
+    dWorldSetLinearDampingThreshold(world_, 0.0);
+    dWorldSetAngularDampingThreshold(world_, 0.0);
 }
 
 void OdeWorld::CreateGround() {
@@ -193,6 +199,13 @@ OdeWorld::DynamicEntity OdeWorld::CreateCube(std::uint32_t entity_id, EntityKind
     dMassSetBoxTotal(&ode_mass, mass, size, size, size);
     dBodySetMass(body, &ode_mass);
     dBodySetPosition(body, position.x, position.y, position.z);
+    if (kind == EntityKind::PlayerCube) {
+        // player cube 需要像游戏角色一样“松手后较快停下”，否则会像冰面一样滑很远。
+        // small cubes 仍保留较低阻尼，方便观察被推动、滚动和翻倒。
+        dBodySetDamping(body, kPlayerLinearDamping, kPlayerAngularDamping);
+    } else {
+        dBodySetDamping(body, kSmallCubeLinearDamping, kSmallCubeAngularDamping);
+    }
     dGeomSetBody(geom, body);
 
     return DynamicEntity{
