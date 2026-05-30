@@ -13,6 +13,7 @@ constexpr std::uint8_t kVersion = 1;
 constexpr std::uint16_t kHeaderSize = 16;
 constexpr std::size_t kMaxUdpPayloadSize = 1200;
 constexpr std::size_t kMaxSnapshotEntities = 16;
+constexpr std::uint16_t kEntityFlagInteracting = 1u << 0u;
 
 enum class PacketType : std::uint8_t {
     Input = 1,
@@ -99,6 +100,18 @@ struct DecodedSnapshot {
     DecodeError error = DecodeError::None;
 };
 
+struct DecodedPing {
+    PacketHeader header;
+    PingPayload payload;
+    DecodeError error = DecodeError::None;
+};
+
+struct DecodedPong {
+    PacketHeader header;
+    PongPayload payload;
+    DecodeError error = DecodeError::None;
+};
+
 const char* DecodeErrorName(DecodeError error);
 const char* PacketTypeName(PacketType packet_type);
 
@@ -109,9 +122,11 @@ std::vector<std::uint8_t> EncodeSnapshot(std::uint32_t sequence, const SnapshotP
 DecodedSnapshot DecodeSnapshot(const std::uint8_t* data, std::size_t size);
 
 std::vector<std::uint8_t> EncodePing(std::uint32_t sequence, const PingPayload& payload);
+DecodedPing DecodePing(const std::uint8_t* data, std::size_t size);
+
 std::vector<std::uint8_t> EncodePong(std::uint32_t sequence, const PongPayload& payload);
+DecodedPong DecodePong(const std::uint8_t* data, std::size_t size);
 
 DecodedHeader DecodeHeaderOnly(const std::uint8_t* data, std::size_t size);
 
 }  // namespace xdpg
-

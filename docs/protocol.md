@@ -140,6 +140,12 @@ Entity type：
 3 = static_ground
 ```
 
+Entity flags：
+
+```text
+bit 0 = interacting
+```
+
 第一阶段 snapshot 可以不发送无限 ground plane，因为 viewer 可以本地绘制地面。
 动态 cube 必须发送。
 

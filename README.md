@@ -72,6 +72,35 @@ xdpg_physics_test
 - `xdg_protocol_test` 验证 INPUT、SNAPSHOT 和基础 header validation 的二进制编解码。
 - `xdpg_physics_test` 验证 ODE world 可以推进 tick、处理 input，并导出 entity state。
 
+## 启动 DS Server
+
+Windows 本地调试：
+
+```powershell
+cmake --build build --config Debug --target xdpg_server
+.\build\server\Debug\xdpg_server.exe --port 40000 --small-cubes 15
+```
+
+Ubuntu 22.04 云服务器：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --target xdpg_server
+./build/server/xdpg_server --port 40000 --small-cubes 15
+```
+
+当前 UDP snapshot v1 为了避免分片，最多发送 16 个 entity。server 第一版默认是：
+
+```text
+1 player cube + 15 small cubes
+```
+
+本地 ODE viewer 可以显示更多 cube；网络 server 后续会通过 snapshot 分包或 chunked
+snapshot 支持更多 entity。
+
+云服务器测试前，需要在腾讯云防火墙/安全组里放行对应 UDP 端口，例如
+`40000/udp`。如果本地客户端连不上，优先检查云防火墙，再检查 Ubuntu 防火墙。
+
 ## ODE 本地依赖
 
 Windows 本地可以把 ODE 安装在项目目录下：

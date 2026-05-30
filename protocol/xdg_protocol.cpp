@@ -358,6 +358,25 @@ std::vector<std::uint8_t> EncodePing(std::uint32_t sequence, const PingPayload& 
     return out;
 }
 
+DecodedPing DecodePing(const std::uint8_t* data, std::size_t size) {
+    DecodedPing decoded;
+    auto header = DecodeHeaderInternal(data, size);
+    decoded.header = header.header;
+    decoded.error = header.error;
+    if (decoded.error != DecodeError::None) {
+        return decoded;
+    }
+    if (decoded.header.packet_type != PacketType::Ping ||
+        decoded.header.payload_size != kPingPayloadSize) {
+        decoded.error = DecodeError::InvalidPacketPayload;
+        return decoded;
+    }
+
+    std::size_t offset = kHeaderSize;
+    decoded.payload.timestamp_usec = ReadU64Le(data, offset);
+    return decoded;
+}
+
 std::vector<std::uint8_t> EncodePong(std::uint32_t sequence, const PongPayload& payload) {
     std::vector<std::uint8_t> out;
     out.reserve(kHeaderSize + kPongPayloadSize);
@@ -365,6 +384,26 @@ std::vector<std::uint8_t> EncodePong(std::uint32_t sequence, const PongPayload& 
     WriteU64Le(out, payload.timestamp_usec);
     WriteU64Le(out, payload.server_timestamp_usec);
     return out;
+}
+
+DecodedPong DecodePong(const std::uint8_t* data, std::size_t size) {
+    DecodedPong decoded;
+    auto header = DecodeHeaderInternal(data, size);
+    decoded.header = header.header;
+    decoded.error = header.error;
+    if (decoded.error != DecodeError::None) {
+        return decoded;
+    }
+    if (decoded.header.packet_type != PacketType::Pong ||
+        decoded.header.payload_size != kPongPayloadSize) {
+        decoded.error = DecodeError::InvalidPacketPayload;
+        return decoded;
+    }
+
+    std::size_t offset = kHeaderSize;
+    decoded.payload.timestamp_usec = ReadU64Le(data, offset);
+    decoded.payload.server_timestamp_usec = ReadU64Le(data, offset);
+    return decoded;
 }
 
 DecodedHeader DecodeHeaderOnly(const std::uint8_t* data, std::size_t size) {

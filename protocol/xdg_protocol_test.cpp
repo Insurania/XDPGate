@@ -115,6 +115,22 @@ void TestHeaderValidation() {
             "bad payload size should fail");
 }
 
+void TestPingPongRoundTrip() {
+    const auto ping_packet = xdpg::EncodePing(10, xdpg::PingPayload{123456});
+    const auto decoded_ping = xdpg::DecodePing(ping_packet.data(), ping_packet.size());
+    Require(decoded_ping.error == xdpg::DecodeError::None, "PING decode should succeed");
+    Require(decoded_ping.header.sequence == 10, "PING sequence mismatch");
+    Require(decoded_ping.payload.timestamp_usec == 123456, "PING timestamp mismatch");
+
+    const auto pong_packet = xdpg::EncodePong(11, xdpg::PongPayload{123456, 222222});
+    const auto decoded_pong = xdpg::DecodePong(pong_packet.data(), pong_packet.size());
+    Require(decoded_pong.error == xdpg::DecodeError::None, "PONG decode should succeed");
+    Require(decoded_pong.header.sequence == 11, "PONG sequence mismatch");
+    Require(decoded_pong.payload.timestamp_usec == 123456, "PONG timestamp mismatch");
+    Require(decoded_pong.payload.server_timestamp_usec == 222222,
+            "PONG server timestamp mismatch");
+}
+
 }  // namespace
 
 int main() {
@@ -122,6 +138,7 @@ int main() {
         TestInputRoundTrip();
         TestSnapshotRoundTrip();
         TestHeaderValidation();
+        TestPingPongRoundTrip();
     } catch (const std::exception& e) {
         std::cerr << "协议测试失败: " << e.what() << '\n';
         return EXIT_FAILURE;
