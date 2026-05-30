@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -111,9 +112,71 @@ bool g_previous_boost_down = false;
 std::chrono::steady_clock::time_point g_next_input_time;
 std::chrono::steady_clock::time_point g_next_ping_time;
 std::chrono::steady_clock::time_point g_next_stats_time;
+std::chrono::steady_clock::time_point g_last_stats_time;
 std::uint64_t g_received_snapshot_chunks = 0;
 std::uint64_t g_completed_snapshots = 0;
 std::uint64_t g_decode_errors = 0;
+std::uint64_t g_rx_bytes = 0;
+std::uint64_t g_tx_bytes = 0;
+std::uint64_t g_last_rx_bytes = 0;
+std::uint64_t g_last_tx_bytes = 0;
+std::uint64_t g_last_snapshot_chunks = 0;
+std::uint64_t g_last_completed_snapshots = 0;
+
+#if defined(_WIN32)
+BOOL CALLBACK FindCurrentProcessDrawstuffWindow(HWND hwnd, LPARAM lparam) {
+    DWORD process_id = 0;
+    GetWindowThreadProcessId(hwnd, &process_id);
+    if (process_id != GetCurrentProcessId()) {
+        return TRUE;
+    }
+
+    char class_name[64] = {};
+    GetClassNameA(hwnd, class_name, sizeof(class_name));
+    if (std::string(class_name) == "SimAppClass") {
+        *reinterpret_cast<HWND*>(lparam) = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND FindDrawstuffWindow() {
+    HWND hwnd = nullptr;
+    EnumWindows(&FindCurrentProcessDrawstuffWindow, reinterpret_cast<LPARAM>(&hwnd));
+    return hwnd;
+}
+#endif
+
+std::string FormatMbps(double bytes_per_second) {
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(3);
+    out << (bytes_per_second * 8.0 / 1000000.0);
+    return out.str();
+}
+
+void UpdateRuntimeBandwidthDisplay(
+    double rx_bytes_per_second,
+    double tx_bytes_per_second,
+    std::uint64_t completed_snapshots_per_second,
+    std::uint64_t snapshot_chunks_per_second) {
+    const std::string rx_mbps = FormatMbps(rx_bytes_per_second);
+    const std::string tx_mbps = FormatMbps(tx_bytes_per_second);
+
+#if defined(_WIN32)
+    // drawstuff 没有 2D 文本 HUD API。Windows 下先把实时带宽写到图形窗口标题，
+    // 再同步到控制台标题；这样看画面或看终端都能直接看到当前 RX/TX 速率。
+    std::ostringstream title;
+    title << "XDPGate RX " << rx_mbps << " Mbps TX " << tx_mbps
+          << " Mbps snapshots " << completed_snapshots_per_second
+          << "/s chunks " << snapshot_chunks_per_second << "/s";
+    const std::string title_text = title.str();
+    if (HWND window = FindDrawstuffWindow()) {
+        SetWindowTextA(window, title_text.c_str());
+    }
+    SetConsoleTitleA(title_text.c_str());
+#endif
+}
 
 std::uint64_t NowUsec() {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
@@ -261,6 +324,8 @@ void SendInputIfDue() {
     std::string error;
     if (!g_socket.Send(packet.data(), packet.size(), g_server_endpoint, &error)) {
         std::cerr << "send INPUT failed: " << error << '\n';
+    } else {
+        g_tx_bytes += packet.size();
     }
     g_next_input_time += input_dt;
 }
@@ -275,6 +340,8 @@ void SendPingIfDue() {
     std::string error;
     if (!g_socket.Send(packet.data(), packet.size(), g_server_endpoint, &error)) {
         std::cerr << "send PING failed: " << error << '\n';
+    } else {
+        g_tx_bytes += packet.size();
     }
     g_next_ping_time += std::chrono::seconds(1);
 }
@@ -292,6 +359,7 @@ void DrainSocket() {
             std::cerr << "UDP receive error: " << error << '\n';
             return;
         }
+        g_rx_bytes += static_cast<std::uint64_t>(received);
 
         const auto header = xdpg::DecodeHeaderOnly(buffer.data(), static_cast<std::size_t>(received));
         if (header.error != xdpg::DecodeError::None) {
@@ -430,11 +498,36 @@ void LogStatsIfDue() {
         return;
     }
     g_next_stats_time = now + std::chrono::seconds(1);
+    const double elapsed_seconds =
+        std::chrono::duration<double>(now - g_last_stats_time).count();
+    g_last_stats_time = now;
+
+    const std::uint64_t rx_delta = g_rx_bytes - g_last_rx_bytes;
+    const std::uint64_t tx_delta = g_tx_bytes - g_last_tx_bytes;
+    const std::uint64_t chunk_delta = g_received_snapshot_chunks - g_last_snapshot_chunks;
+    const std::uint64_t completed_delta = g_completed_snapshots - g_last_completed_snapshots;
+    g_last_rx_bytes = g_rx_bytes;
+    g_last_tx_bytes = g_tx_bytes;
+    g_last_snapshot_chunks = g_received_snapshot_chunks;
+    g_last_completed_snapshots = g_completed_snapshots;
+
+    const double safe_elapsed = elapsed_seconds > 0.001 ? elapsed_seconds : 1.0;
+    const double rx_bytes_per_second = static_cast<double>(rx_delta) / safe_elapsed;
+    const double tx_bytes_per_second = static_cast<double>(tx_delta) / safe_elapsed;
+    const auto chunks_per_second =
+        static_cast<std::uint64_t>(static_cast<double>(chunk_delta) / safe_elapsed + 0.5);
+    const auto completed_per_second =
+        static_cast<std::uint64_t>(static_cast<double>(completed_delta) / safe_elapsed + 0.5);
+
+    UpdateRuntimeBandwidthDisplay(rx_bytes_per_second, tx_bytes_per_second, completed_per_second,
+                                  chunks_per_second);
 
     std::cout << "[viewer] tick=" << g_snapshot_assembly.tick
               << " entities=" << g_entities.size()
-              << " chunks=" << g_received_snapshot_chunks
-              << " completed_snapshots=" << g_completed_snapshots
+              << " rx=" << FormatMbps(rx_bytes_per_second) << "Mbps"
+              << " tx=" << FormatMbps(tx_bytes_per_second) << "Mbps"
+              << " chunks/s=" << chunks_per_second
+              << " snapshots/s=" << completed_per_second
               << " decode_errors=" << g_decode_errors << '\n';
 }
 
@@ -502,6 +595,7 @@ int main(int argc, char** argv) {
         g_next_input_time = now;
         g_next_ping_time = now;
         g_next_stats_time = now + std::chrono::seconds(1);
+        g_last_stats_time = now;
 
         std::vector<char*> draw_argv;
         draw_argv.reserve(draw_args_storage.size());

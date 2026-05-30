@@ -178,6 +178,8 @@ sudo apt install -y libode-dev
 - 读取 W/A/S/D/Space 输入并通过 UDP 发送 INPUT packet；
 - 接收 server 返回的 snapshot chunk；
 - 等同一 `server_tick` 的分包收齐后渲染 cube 状态。
+- 每秒统计应用层 UDP payload 带宽，并在 Windows 图形窗口标题/控制台标题中显示
+  `RX Mbps`、`TX Mbps`、`snapshots/s` 和 `chunks/s`。
 
 先启动 DS server：
 
