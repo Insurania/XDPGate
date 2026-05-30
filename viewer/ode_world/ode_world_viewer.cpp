@@ -21,6 +21,7 @@ namespace {
 std::unique_ptr<xdpg::physics::OdeWorld> g_world;
 std::uint32_t g_input_sequence = 0;
 bool g_previous_boost_down = false;
+float g_camera_yaw_degrees = 130.0f;
 
 bool IsKeyDown(int key) {
 #if defined(_WIN32)
@@ -125,9 +126,37 @@ void DrawEntity(const xdpg::physics::EntityState& entity) {
     dsDrawBox(pos, rot, sides);
 }
 
+void UpdateFollowCamera(const xdpg::physics::EntityState& player) {
+    float player_pos[3];
+    OdeToDrawPosition(player.position, player_pos);
+
+    // drawstuff 的相机用 xyz + hpr 表示。这里不跟随 cube 自身旋转，
+    // 而是固定在玩家斜后上方，避免 player 翻滚时镜头也跟着翻到天旋地转。
+    constexpr float kFollowDistance = 8.0f;
+    constexpr float kFollowHeight = 6.5f;
+    constexpr float kViewYawDegrees = 130.0f;
+    constexpr float kPitchDegrees = -38.0f;
+    constexpr float kRadiansPerDegree = 3.1415926535f / 180.0f;
+
+    g_camera_yaw_degrees = kViewYawDegrees;
+    const float yaw_radians = g_camera_yaw_degrees * kRadiansPerDegree;
+    float xyz[3]{
+        player_pos[0] - std::cos(yaw_radians) * kFollowDistance,
+        player_pos[1] - std::sin(yaw_radians) * kFollowDistance,
+        player_pos[2] + kFollowHeight,
+    };
+    float hpr[3]{
+        g_camera_yaw_degrees,
+        kPitchDegrees,
+        0.0f,
+    };
+
+    dsSetViewpoint(xyz, hpr);
+}
+
 void Start() {
-    static float xyz[3] = {6.0f, -9.0f, 6.0f};
-    static float hpr[3] = {130.0f, -24.0f, 0.0f};
+    static float xyz[3] = {6.0f, -6.0f, 6.5f};
+    static float hpr[3] = {130.0f, -38.0f, 0.0f};
     dsSetViewpoint(xyz, hpr);
     std::cout << "XDPGate ODE world viewer\n"
               << "Hold W/A/S/D to move, tap Space to boost, press Q or Esc to quit.\n";
@@ -144,8 +173,16 @@ void Step(int pause) {
         g_world->Step();
     }
 
+    const auto entities = g_world->CollectEntityStates();
+    for (const auto& entity : entities) {
+        if (entity.kind == xdpg::physics::EntityKind::PlayerCube) {
+            UpdateFollowCamera(entity);
+            break;
+        }
+    }
+
     DrawGround();
-    for (const auto& entity : g_world->CollectEntityStates()) {
+    for (const auto& entity : entities) {
         DrawEntity(entity);
     }
 }
