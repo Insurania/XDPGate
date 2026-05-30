@@ -3,6 +3,7 @@
 #include "xdpg/physics/input_command.h"
 #include "xdpg/physics/ode_world.h"
 #include "xdpg/net/udp_socket.h"
+#include "protocol/xdg_protocol.h"
 
 #include <array>
 #include <atomic>
@@ -67,6 +68,12 @@ private:
     void LogStatsIfDue();
     void RegisterClient(const net::Endpoint& endpoint);
     void RemoveStaleClients();
+    std::vector<xdpg::EntitySnapshot> BuildCurrentSnapshotEntities() const;
+    std::vector<xdpg::EntitySnapshot> CollectChangedEntities(
+        const std::vector<xdpg::EntitySnapshot>& current) const;
+    xdpg::SnapshotEncodingMode ChooseSnapshotEncoding(
+        const std::vector<xdpg::EntitySnapshot>& current,
+        const std::vector<xdpg::EntitySnapshot>& changed) const;
 
     DsServerConfig config_;
     net::UdpSocket socket_;
@@ -85,6 +92,9 @@ private:
 
     // 发送方向的 packet sequence。它是 server-local 序号，不等同于 input_sequence。
     std::uint32_t outbound_sequence_ = 1;
+    std::vector<xdpg::EntitySnapshot> previous_snapshot_entities_;
+    bool has_previous_snapshot_ = false;
+    std::uint32_t snapshots_since_full_ = 0;
 
     Counters counters_;
     Counters last_logged_counters_;

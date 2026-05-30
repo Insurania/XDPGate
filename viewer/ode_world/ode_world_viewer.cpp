@@ -46,6 +46,7 @@ struct RenderEntity {
 
 struct SnapshotAssembly {
     std::uint64_t tick = 0;
+    xdpg::SnapshotEncodingMode encoding_mode = xdpg::SnapshotEncodingMode::Full;
     std::uint16_t expected_chunks = 0;
     std::uint16_t total_entities = 0;
     std::vector<bool> seen_chunks;
@@ -53,6 +54,7 @@ struct SnapshotAssembly {
 
     void Reset(const xdpg::SnapshotPayload& payload) {
         tick = payload.server_tick;
+        encoding_mode = payload.encoding_mode;
         expected_chunks = payload.chunk_count;
         total_entities = payload.total_entity_count;
         seen_chunks.assign(expected_chunks, false);
@@ -60,12 +62,16 @@ struct SnapshotAssembly {
         chunks.resize(expected_chunks);
     }
 
-    bool AddChunk(const xdpg::SnapshotPayload& payload, std::vector<RenderEntity>* out_entities) {
+    bool AddChunk(
+        const xdpg::SnapshotPayload& payload,
+        std::vector<xdpg::EntitySnapshot>* out_entities) {
         // 第一版只重组“当前最新 tick”。如果 UDP 乱序带来旧 tick 的尾包，直接忽略；
         // 后续做 interpolation buffer 时，会改成按 tick 保存多个 assembly。
         if (expected_chunks == 0 || payload.server_tick > tick) {
             Reset(payload);
-        } else if (payload.server_tick < tick || payload.chunk_count != expected_chunks) {
+        } else if (payload.server_tick < tick ||
+                   payload.chunk_count != expected_chunks ||
+                   payload.encoding_mode != encoding_mode) {
             return false;
         }
 
@@ -86,15 +92,7 @@ struct SnapshotAssembly {
         out_entities->reserve(total_entities);
         for (const auto& chunk : chunks) {
             for (const auto& snapshot : chunk) {
-                RenderEntity entity;
-                entity.entity_id = snapshot.entity_id;
-                entity.entity_type = snapshot.entity_type;
-                entity.flags = snapshot.flags;
-                std::copy(std::begin(snapshot.position), std::end(snapshot.position),
-                          std::begin(entity.position));
-                std::copy(std::begin(snapshot.rotation), std::end(snapshot.rotation),
-                          std::begin(entity.rotation));
-                out_entities->push_back(entity);
+                out_entities->push_back(snapshot);
             }
         }
         return true;
@@ -106,6 +104,7 @@ xdpg::net::UdpSocket g_socket;
 xdpg::net::Endpoint g_server_endpoint;
 SnapshotAssembly g_snapshot_assembly;
 std::vector<RenderEntity> g_entities;
+bool g_has_full_snapshot = false;
 std::uint32_t g_packet_sequence = 1;
 std::uint32_t g_input_sequence = 1;
 bool g_previous_boost_down = false;
@@ -159,7 +158,8 @@ void UpdateRuntimeBandwidthDisplay(
     double rx_bytes_per_second,
     double tx_bytes_per_second,
     std::uint64_t completed_snapshots_per_second,
-    std::uint64_t snapshot_chunks_per_second) {
+    std::uint64_t snapshot_chunks_per_second,
+    xdpg::SnapshotEncodingMode mode) {
     const std::string rx_mbps = FormatMbps(rx_bytes_per_second);
     const std::string tx_mbps = FormatMbps(tx_bytes_per_second);
 
@@ -168,7 +168,8 @@ void UpdateRuntimeBandwidthDisplay(
     // 再同步到控制台标题；这样看画面或看终端都能直接看到当前 RX/TX 速率。
     std::ostringstream title;
     title << "XDPGate RX " << rx_mbps << " Mbps TX " << tx_mbps
-          << " Mbps snapshots " << completed_snapshots_per_second
+          << " Mbps mode " << xdpg::SnapshotEncodingModeName(mode)
+          << " snapshots " << completed_snapshots_per_second
           << "/s chunks " << snapshot_chunks_per_second << "/s";
     const std::string title_text = title.str();
     if (HWND window = FindDrawstuffWindow()) {
@@ -375,7 +376,45 @@ void DrainSocket() {
                 continue;
             }
             ++g_received_snapshot_chunks;
-            if (g_snapshot_assembly.AddChunk(snapshot.payload, &g_entities)) {
+            std::vector<xdpg::EntitySnapshot> assembled_entities;
+            if (g_snapshot_assembly.AddChunk(snapshot.payload, &assembled_entities)) {
+                if (snapshot.payload.encoding_mode == xdpg::SnapshotEncodingMode::Full) {
+                    g_entities.clear();
+                    g_entities.reserve(assembled_entities.size());
+                    for (const auto& snapshot_entity : assembled_entities) {
+                        RenderEntity entity;
+                        entity.entity_id = snapshot_entity.entity_id;
+                        entity.entity_type = snapshot_entity.entity_type;
+                        entity.flags = snapshot_entity.flags;
+                        std::copy(std::begin(snapshot_entity.position),
+                                  std::end(snapshot_entity.position),
+                                  std::begin(entity.position));
+                        std::copy(std::begin(snapshot_entity.rotation),
+                                  std::end(snapshot_entity.rotation),
+                                  std::begin(entity.rotation));
+                        g_entities.push_back(entity);
+                    }
+                    g_has_full_snapshot = true;
+                } else if (g_has_full_snapshot) {
+                    for (const auto& snapshot_entity : assembled_entities) {
+                        auto it = std::find_if(g_entities.begin(), g_entities.end(),
+                                               [&snapshot_entity](const RenderEntity& entity) {
+                                                   return entity.entity_id ==
+                                                          snapshot_entity.entity_id;
+                                               });
+                        if (it == g_entities.end()) {
+                            continue;
+                        }
+                        it->entity_type = snapshot_entity.entity_type;
+                        it->flags = snapshot_entity.flags;
+                        std::copy(std::begin(snapshot_entity.position),
+                                  std::end(snapshot_entity.position),
+                                  std::begin(it->position));
+                        std::copy(std::begin(snapshot_entity.rotation),
+                                  std::end(snapshot_entity.rotation),
+                                  std::begin(it->rotation));
+                    }
+                }
                 ++g_completed_snapshots;
             }
         } else if (header.header.packet_type == xdpg::PacketType::Pong) {
@@ -520,10 +559,11 @@ void LogStatsIfDue() {
         static_cast<std::uint64_t>(static_cast<double>(completed_delta) / safe_elapsed + 0.5);
 
     UpdateRuntimeBandwidthDisplay(rx_bytes_per_second, tx_bytes_per_second, completed_per_second,
-                                  chunks_per_second);
+                                  chunks_per_second, g_snapshot_assembly.encoding_mode);
 
     std::cout << "[viewer] tick=" << g_snapshot_assembly.tick
               << " entities=" << g_entities.size()
+              << " mode=" << xdpg::SnapshotEncodingModeName(g_snapshot_assembly.encoding_mode)
               << " rx=" << FormatMbps(rx_bytes_per_second) << "Mbps"
               << " tx=" << FormatMbps(tx_bytes_per_second) << "Mbps"
               << " chunks/s=" << chunks_per_second

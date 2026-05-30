@@ -46,6 +46,7 @@ struct Counters {
 
 struct SnapshotAssembly {
     std::uint64_t tick = 0;
+    xdpg::SnapshotEncodingMode encoding_mode = xdpg::SnapshotEncodingMode::Full;
     std::uint16_t expected_chunks = 0;
     std::uint16_t total_entities = 0;
     std::uint32_t last_processed_input_sequence = 0;
@@ -53,6 +54,7 @@ struct SnapshotAssembly {
 
     void Reset(const xdpg::SnapshotPayload& payload) {
         tick = payload.server_tick;
+        encoding_mode = payload.encoding_mode;
         expected_chunks = payload.chunk_count;
         total_entities = payload.total_entity_count;
         last_processed_input_sequence = payload.last_processed_input_sequence;
@@ -62,7 +64,9 @@ struct SnapshotAssembly {
     bool AddChunk(const xdpg::SnapshotPayload& payload) {
         // 分包重组这里只做观测，不保存所有 entity。真正的网络 viewer 后续会把 entity
         // 状态缓存在 tick buffer 中，再做插值/预测等渲染策略。
-        if (payload.server_tick != tick || payload.chunk_count != expected_chunks) {
+        if (payload.server_tick != tick ||
+            payload.chunk_count != expected_chunks ||
+            payload.encoding_mode != encoding_mode) {
             Reset(payload);
         }
         if (payload.chunk_index >= seen_chunks.size()) {

@@ -16,6 +16,10 @@ constexpr std::size_t kEntitySnapshotSize = kEntitySnapshotWireSize;
 constexpr std::size_t kPingPayloadSize = 8;
 constexpr std::size_t kPongPayloadSize = 16;
 constexpr float kQuaternionSmallestThreeLimit = 0.7071067811865476f;
+constexpr std::uint32_t kPlayerDenseIndex = 0;
+constexpr std::uint32_t kPlayerEntityId = 1;
+constexpr std::uint32_t kSmallCubeDenseIndexBase = 1;
+constexpr std::uint32_t kSmallCubeEntityIdBase = 1000;
 
 // 这里不用 reinterpret_cast 直接读写整数，是为了避免 CPU 对齐、结构体 padding、
 // 主机字节序等因素影响网络协议。当前协议固定为 little-endian，小端 helper 是
@@ -107,6 +111,16 @@ bool IsKnownPacketType(std::uint8_t value) {
         case PacketType::Ping:
         case PacketType::Pong:
         case PacketType::Benchmark:
+            return true;
+    }
+    return false;
+}
+
+bool IsKnownSnapshotEncodingMode(std::uint16_t value) {
+    switch (static_cast<SnapshotEncodingMode>(value)) {
+        case SnapshotEncodingMode::Full:
+        case SnapshotEncodingMode::DeltaOffsetU8:
+        case SnapshotEncodingMode::DeltaOffsetU16:
             return true;
     }
     return false;
@@ -287,15 +301,47 @@ bool ReadCompressedRotation(const std::uint8_t* data, std::size_t& offset, float
     return true;
 }
 
-void WriteEntitySnapshot(std::vector<std::uint8_t>& out, const EntitySnapshot& entity) {
-    WriteU32Le(out, entity.entity_id);
-    WriteU16Le(out, static_cast<std::uint16_t>(entity.entity_type));
+std::uint32_t DenseIndexFromEntityId(std::uint32_t entity_id) {
+    if (entity_id == kPlayerEntityId) {
+        return kPlayerDenseIndex;
+    }
+    if (entity_id >= kSmallCubeEntityIdBase) {
+        return kSmallCubeDenseIndexBase + (entity_id - kSmallCubeEntityIdBase);
+    }
+    throw std::invalid_argument("entity_id cannot be represented as dense snapshot index");
+}
+
+EntitySnapshot EntityFromDenseIndex(std::uint32_t dense_index) {
+    EntitySnapshot entity;
+    if (dense_index == kPlayerDenseIndex) {
+        entity.entity_id = kPlayerEntityId;
+        entity.entity_type = EntityType::PlayerCube;
+    } else {
+        entity.entity_id = kSmallCubeEntityIdBase + (dense_index - kSmallCubeDenseIndexBase);
+        entity.entity_type = EntityType::SmallCube;
+    }
+    return entity;
+}
+
+void WriteEntityState(std::vector<std::uint8_t>& out, const EntitySnapshot& entity) {
     WriteU16Le(out, entity.flags);
     WriteCompressedPosition(out, entity.position);
     WriteCompressedRotation(out, entity.rotation);
 }
 
-bool ReadEntitySnapshot(const std::uint8_t* data, std::size_t& offset, EntitySnapshot* out) {
+bool ReadEntityState(const std::uint8_t* data, std::size_t& offset, EntitySnapshot* entity) {
+    entity->flags = ReadU16Le(data, offset);
+    ReadCompressedPosition(data, offset, entity->position);
+    return ReadCompressedRotation(data, offset, entity->rotation);
+}
+
+void WriteFullEntitySnapshot(std::vector<std::uint8_t>& out, const EntitySnapshot& entity) {
+    WriteU32Le(out, entity.entity_id);
+    WriteU16Le(out, static_cast<std::uint16_t>(entity.entity_type));
+    WriteEntityState(out, entity);
+}
+
+bool ReadFullEntitySnapshot(const std::uint8_t* data, std::size_t& offset, EntitySnapshot* out) {
     if (out == nullptr) {
         return false;
     }
@@ -303,11 +349,65 @@ bool ReadEntitySnapshot(const std::uint8_t* data, std::size_t& offset, EntitySna
     EntitySnapshot entity;
     entity.entity_id = ReadU32Le(data, offset);
     entity.entity_type = static_cast<EntityType>(ReadU16Le(data, offset));
-    entity.flags = ReadU16Le(data, offset);
-    ReadCompressedPosition(data, offset, entity.position);
-    if (!ReadCompressedRotation(data, offset, entity.rotation)) {
+    if (!ReadEntityState(data, offset, &entity)) {
         return false;
     }
+    *out = entity;
+    return true;
+}
+
+void WriteDeltaEntitySnapshot(
+    std::vector<std::uint8_t>& out,
+    SnapshotEncodingMode mode,
+    const EntitySnapshot& entity,
+    std::int64_t* previous_dense_index) {
+    const std::uint32_t dense_index = DenseIndexFromEntityId(entity.entity_id);
+    if (static_cast<std::int64_t>(dense_index) <= *previous_dense_index) {
+        throw std::invalid_argument("delta snapshot entities must be sorted by dense index");
+    }
+    const auto relative_offset =
+        static_cast<std::uint32_t>(static_cast<std::int64_t>(dense_index) - *previous_dense_index - 1);
+    if (mode == SnapshotEncodingMode::DeltaOffsetU8) {
+        if (relative_offset > UINT8_MAX) {
+            throw std::invalid_argument("delta offset does not fit in u8");
+        }
+        WriteU8(out, static_cast<std::uint8_t>(relative_offset));
+    } else if (mode == SnapshotEncodingMode::DeltaOffsetU16) {
+        if (relative_offset > UINT16_MAX) {
+            throw std::invalid_argument("delta offset does not fit in u16");
+        }
+        WriteU16Le(out, static_cast<std::uint16_t>(relative_offset));
+    } else {
+        throw std::invalid_argument("invalid delta snapshot encoding mode");
+    }
+
+    WriteEntityState(out, entity);
+    *previous_dense_index = dense_index;
+}
+
+bool ReadDeltaEntitySnapshot(
+    const std::uint8_t* data,
+    std::size_t& offset,
+    SnapshotEncodingMode mode,
+    std::int64_t* previous_dense_index,
+    EntitySnapshot* out) {
+    std::uint32_t relative_offset = 0;
+    if (mode == SnapshotEncodingMode::DeltaOffsetU8) {
+        relative_offset = ReadU8(data, offset);
+    } else if (mode == SnapshotEncodingMode::DeltaOffsetU16) {
+        relative_offset = ReadU16Le(data, offset);
+    } else {
+        return false;
+    }
+
+    const auto dense_index =
+        static_cast<std::uint32_t>(*previous_dense_index + relative_offset + 1);
+    EntitySnapshot entity = EntityFromDenseIndex(dense_index);
+    if (!ReadEntityState(data, offset, &entity)) {
+        return false;
+    }
+
+    *previous_dense_index = dense_index;
     *out = entity;
     return true;
 }
@@ -363,6 +463,35 @@ const char* PacketTypeName(PacketType packet_type) {
     return "UNKNOWN";
 }
 
+const char* SnapshotEncodingModeName(SnapshotEncodingMode mode) {
+    switch (mode) {
+        case SnapshotEncodingMode::Full:
+            return "FULL";
+        case SnapshotEncodingMode::DeltaOffsetU8:
+            return "DELTA_OFFSET_U8";
+        case SnapshotEncodingMode::DeltaOffsetU16:
+            return "DELTA_OFFSET_U16";
+    }
+    return "UNKNOWN";
+}
+
+std::size_t SnapshotEntityWireSize(SnapshotEncodingMode mode) {
+    switch (mode) {
+        case SnapshotEncodingMode::Full:
+            return kEntitySnapshotWireSize;
+        case SnapshotEncodingMode::DeltaOffsetU8:
+            return kDeltaSnapshotOffsetU8WireSize;
+        case SnapshotEncodingMode::DeltaOffsetU16:
+            return kDeltaSnapshotOffsetU16WireSize;
+    }
+    throw std::invalid_argument("unknown snapshot encoding mode");
+}
+
+std::size_t MaxSnapshotEntitiesPerPacket(SnapshotEncodingMode mode) {
+    return (kMaxUdpPayloadSize - kHeaderSize - kSnapshotPayloadHeaderSize) /
+           SnapshotEntityWireSize(mode);
+}
+
 std::vector<std::uint8_t> EncodeInput(std::uint32_t sequence, const InputPayload& payload) {
     std::vector<std::uint8_t> out;
     out.reserve(kHeaderSize + kInputPayloadSize);
@@ -390,7 +519,7 @@ DecodedInput DecodeInput(const std::uint8_t* data, std::size_t size) {
 }
 
 std::vector<std::uint8_t> EncodeSnapshot(std::uint32_t sequence, const SnapshotPayload& payload) {
-    if (payload.entities.size() > kMaxSnapshotEntitiesPerPacket) {
+    if (payload.entities.size() > MaxSnapshotEntitiesPerPacket(payload.encoding_mode)) {
         throw std::invalid_argument("too many snapshot entities in one packet");
     }
     if (payload.chunk_count == 0 || payload.chunk_index >= payload.chunk_count) {
@@ -401,7 +530,7 @@ std::vector<std::uint8_t> EncodeSnapshot(std::uint32_t sequence, const SnapshotP
     }
 
     const std::size_t payload_size =
-        kSnapshotPrefixSize + payload.entities.size() * kEntitySnapshotSize;
+        kSnapshotPrefixSize + payload.entities.size() * SnapshotEntityWireSize(payload.encoding_mode);
     if (kHeaderSize + payload_size > kMaxUdpPayloadSize) {
         throw std::invalid_argument("snapshot exceeds maximum UDP payload size");
     }
@@ -415,10 +544,18 @@ std::vector<std::uint8_t> EncodeSnapshot(std::uint32_t sequence, const SnapshotP
     WriteU16Le(out, payload.chunk_count);
     WriteU16Le(out, payload.total_entity_count);
     WriteU16Le(out, static_cast<std::uint16_t>(payload.entities.size()));
+    WriteU16Le(out, static_cast<std::uint16_t>(payload.encoding_mode));
     WriteU16Le(out, 0);
-    WriteU16Le(out, 0);
-    for (const auto& entity : payload.entities) {
-        WriteEntitySnapshot(out, entity);
+
+    if (payload.encoding_mode == SnapshotEncodingMode::Full) {
+        for (const auto& entity : payload.entities) {
+            WriteFullEntitySnapshot(out, entity);
+        }
+    } else {
+        std::int64_t previous_dense_index = -1;
+        for (const auto& entity : payload.entities) {
+            WriteDeltaEntitySnapshot(out, payload.encoding_mode, entity, &previous_dense_index);
+        }
     }
     return out;
 }
@@ -444,28 +581,48 @@ DecodedSnapshot DecodeSnapshot(const std::uint8_t* data, std::size_t size) {
     decoded.payload.chunk_count = ReadU16Le(data, offset);
     decoded.payload.total_entity_count = ReadU16Le(data, offset);
     const auto entity_count = ReadU16Le(data, offset);
-    const auto reserved0 = ReadU16Le(data, offset);
+    const auto encoding_mode_raw = ReadU16Le(data, offset);
     const auto reserved1 = ReadU16Le(data, offset);
-    if (reserved0 != 0 ||
+    if (!IsKnownSnapshotEncodingMode(encoding_mode_raw) ||
         reserved1 != 0 ||
-        entity_count > kMaxSnapshotEntitiesPerPacket ||
         decoded.payload.chunk_count == 0 ||
         decoded.payload.chunk_index >= decoded.payload.chunk_count ||
-        decoded.payload.total_entity_count < entity_count ||
-        decoded.header.payload_size != kSnapshotPrefixSize + entity_count * kEntitySnapshotSize) {
+        decoded.payload.total_entity_count < entity_count) {
+        decoded.error = DecodeError::InvalidPacketPayload;
+        return decoded;
+    }
+
+    decoded.payload.encoding_mode = static_cast<SnapshotEncodingMode>(encoding_mode_raw);
+    const std::size_t entity_wire_size = SnapshotEntityWireSize(decoded.payload.encoding_mode);
+    if (entity_count > MaxSnapshotEntitiesPerPacket(decoded.payload.encoding_mode) ||
+        decoded.header.payload_size != kSnapshotPrefixSize + entity_count * entity_wire_size) {
         decoded.error = DecodeError::InvalidPacketPayload;
         return decoded;
     }
 
     decoded.payload.entities.reserve(entity_count);
-    for (std::uint16_t i = 0; i < entity_count; ++i) {
-        EntitySnapshot entity;
-        if (!ReadEntitySnapshot(data, offset, &entity)) {
-            decoded.error = DecodeError::InvalidPacketPayload;
-            decoded.payload.entities.clear();
-            return decoded;
+    if (decoded.payload.encoding_mode == SnapshotEncodingMode::Full) {
+        for (std::uint16_t i = 0; i < entity_count; ++i) {
+            EntitySnapshot entity;
+            if (!ReadFullEntitySnapshot(data, offset, &entity)) {
+                decoded.error = DecodeError::InvalidPacketPayload;
+                decoded.payload.entities.clear();
+                return decoded;
+            }
+            decoded.payload.entities.push_back(entity);
         }
-        decoded.payload.entities.push_back(entity);
+    } else {
+        std::int64_t previous_dense_index = -1;
+        for (std::uint16_t i = 0; i < entity_count; ++i) {
+            EntitySnapshot entity;
+            if (!ReadDeltaEntitySnapshot(data, offset, decoded.payload.encoding_mode,
+                                         &previous_dense_index, &entity)) {
+                decoded.error = DecodeError::InvalidPacketPayload;
+                decoded.payload.entities.clear();
+                return decoded;
+            }
+            decoded.payload.entities.push_back(entity);
+        }
     }
     return decoded;
 }

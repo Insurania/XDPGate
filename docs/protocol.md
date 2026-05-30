@@ -113,7 +113,7 @@ struct XdgSnapshotPayloadHeader {
     uint16_t chunk_count;
     uint16_t total_entity_count;
     uint16_t entity_count;
-    uint16_t reserved0;
+    uint16_t encoding_mode;
     uint16_t reserved1;
 };
 ```
@@ -124,13 +124,23 @@ Chunk 字段含义：
 
 - `chunk_index`：当前分片序号，从 0 开始。
 - `chunk_count`：同一个 `server_tick` 的 snapshot 总分片数。
-- `total_entity_count`：完整 snapshot 的 entity 总数。
-- `entity_count`：当前 UDP 包内携带的 entity 数。
+- `total_entity_count`：当前权威世界的完整 entity 总数。
+- `entity_count`：当前 UDP 包内携带的 entity 数。Full 模式表示完整实体数，Delta
+  模式表示变化实体数。
+- `encoding_mode`：当前 snapshot 的实体编码方式。
 
 同一个 `server_tick` 的所有 chunk 共同组成一帧完整 snapshot。viewer/client 可以先
 缓存分片，收齐后再提交显示；第一版 viewer 也可以按 chunk 增量更新。
 
-随后跟随 `entity_count` 个 entity record：
+Encoding mode：
+
+```text
+0 = Full
+1 = DeltaOffsetU8
+2 = DeltaOffsetU16
+```
+
+Full 模式随后跟随 `entity_count` 个完整 entity record：
 
 ```c
 struct XdgEntitySnapshot {
@@ -143,7 +153,54 @@ struct XdgEntitySnapshot {
 };
 ```
 
-Entity record 大小：21 字节。
+Full entity record 大小：21 字节。
+
+Delta 模式只发送变化 entity。变化 entity 按 dense index 升序排列，不直接发送完整
+entity id，而是发送相对上一个变化 entity 的偏移量：
+
+```text
+dense_index:
+0 = player cube
+1 = small cube 1000
+2 = small cube 1001
+...
+
+relative_offset = current_dense_index - previous_dense_index - 1
+first previous_dense_index = -1
+```
+
+DeltaOffsetU8 record：
+
+```c
+struct XdgDeltaOffsetU8Entity {
+    uint8_t  relative_offset;
+    uint16_t flags;
+    uint16_t position_quantized[3];
+    uint8_t  rotation_largest_index;
+    uint16_t rotation_smallest_three[3];
+};
+```
+
+大小：16 字节。
+
+DeltaOffsetU16 record：
+
+```c
+struct XdgDeltaOffsetU16Entity {
+    uint16_t relative_offset;
+    uint16_t flags;
+    uint16_t position_quantized[3];
+    uint8_t  rotation_largest_index;
+    uint16_t rotation_smallest_three[3];
+};
+```
+
+大小：17 字节。
+
+server 会根据变化 entity 数量、offset 是否能放进 `uint8`，以及 chunk/header 开销，
+在 Full、DeltaOffsetU8、DeltaOffsetU16 之间选择估算后最省带宽的编码。为了让新
+viewer 建立基线并修正 UDP 丢包造成的短暂状态漂移，server 会周期性发送 Full
+keyframe。
 
 位置量化范围：
 
@@ -193,7 +250,9 @@ bit 0 = interacting
 Snapshot payload 大小：
 
 ```text
-24 + entity_count * 21
+Full:           24 + entity_count * 21
+DeltaOffsetU8:  24 + entity_count * 16
+DeltaOffsetU16: 24 + entity_count * 17
 ```
 
 ## PING Packet
@@ -260,7 +319,9 @@ struct XdgBenchmarkPayload {
 ```text
 最小 UDP payload: 16 字节
 最大 UDP payload: 1200 字节
-单个 snapshot chunk 最大 entity 数: 55
+单个 Full snapshot chunk 最大 entity 数: 55
+单个 DeltaOffsetU8 snapshot chunk 最大 entity 数: 72
+单个 DeltaOffsetU16 snapshot chunk 最大 entity 数: 68
 ```
 
 1200 字节可以比较稳妥地避开常见 MTU 下的 IP 分片。
@@ -271,8 +332,8 @@ struct XdgBenchmarkPayload {
 header 16 + snapshot prefix 24 + 55 * 21 = 1195 字节
 ```
 
-完整 snapshot 可以由多个 chunk 组成。例如 `1 player + 180 small cubes = 181`
-个 entity，大约需要 4 个 UDP packet。
+完整 Full snapshot 可以由多个 chunk 组成。例如 `1 player + 180 small cubes = 181`
+个 entity，大约需要 4 个 UDP packet。Delta snapshot 只携带变化 entity，通常会更少。
 
 ## 校验规则
 

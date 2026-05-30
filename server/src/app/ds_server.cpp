@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <thread>
 
@@ -36,6 +37,75 @@ float ToFloat(double value) {
     // ODE 本地构建目前使用 double precision；协议层会再做位置/旋转压缩。
     // 在 server 边界先显式收窄成 float，方便把“物理精度”和“网络量化”分层观察。
     return static_cast<float>(value);
+}
+
+std::uint32_t DenseIndexFromEntityId(std::uint32_t entity_id) {
+    if (entity_id == 1) {
+        return 0;
+    }
+    return entity_id >= 1000 ? entity_id - 999 : entity_id;
+}
+
+bool SnapshotEntityChanged(const xdpg::EntitySnapshot& previous,
+                           const xdpg::EntitySnapshot& current) {
+    if (previous.entity_id != current.entity_id ||
+        previous.entity_type != current.entity_type ||
+        previous.flags != current.flags) {
+        return true;
+    }
+
+    // 与协议量化精度对齐：水平轴约 7.8mm/bin，高度轴约 0.49mm/bin。
+    // 使用略小于一个 bin 的阈值，可以过滤静止物体的浮点微抖动，同时不吞掉可见移动。
+    constexpr float kHorizontalPositionEpsilon = 0.006f;
+    constexpr float kVerticalPositionEpsilon = 0.0004f;
+    if (std::fabs(previous.position[0] - current.position[0]) > kHorizontalPositionEpsilon ||
+        std::fabs(previous.position[1] - current.position[1]) > kVerticalPositionEpsilon ||
+        std::fabs(previous.position[2] - current.position[2]) > kHorizontalPositionEpsilon) {
+        return true;
+    }
+
+    constexpr float kRotationEpsilon = 0.00005f;
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (std::fabs(previous.rotation[i] - current.rotation[i]) > kRotationEpsilon) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CanUseOffsetEncoding(const std::vector<xdpg::EntitySnapshot>& entities,
+                          xdpg::SnapshotEncodingMode mode) {
+    const std::uint32_t max_offset =
+        mode == xdpg::SnapshotEncodingMode::DeltaOffsetU8 ? UINT8_MAX : UINT16_MAX;
+    const std::size_t max_per_packet = xdpg::MaxSnapshotEntitiesPerPacket(mode);
+
+    for (std::size_t begin = 0; begin < entities.size(); begin += max_per_packet) {
+        const std::size_t end =
+            begin + max_per_packet < entities.size() ? begin + max_per_packet : entities.size();
+        std::int64_t previous_dense_index = -1;
+        for (std::size_t i = begin; i < end; ++i) {
+            const std::uint32_t dense_index = DenseIndexFromEntityId(entities[i].entity_id);
+            if (static_cast<std::int64_t>(dense_index) <= previous_dense_index) {
+                return false;
+            }
+            const auto offset =
+                static_cast<std::uint32_t>(static_cast<std::int64_t>(dense_index) -
+                                           previous_dense_index - 1);
+            if (offset > max_offset) {
+                return false;
+            }
+            previous_dense_index = dense_index;
+        }
+    }
+    return true;
+}
+
+std::size_t ChunkedSnapshotCost(xdpg::SnapshotEncodingMode mode, std::size_t entity_count) {
+    const std::size_t max_per_packet = xdpg::MaxSnapshotEntitiesPerPacket(mode);
+    const std::size_t chunk_count =
+        entity_count == 0 ? 1 : (entity_count + max_per_packet - 1) / max_per_packet;
+    return chunk_count * (xdpg::kHeaderSize + xdpg::kSnapshotPayloadHeaderSize) +
+           entity_count * xdpg::SnapshotEntityWireSize(mode);
 }
 
 }  // namespace
@@ -201,45 +271,37 @@ void DsServer::SendSnapshot() {
         return;
     }
 
-    const auto states = world_.CollectEntityStates();
-    const std::size_t total_entities = states.size();
-    const std::size_t max_per_packet = xdpg::kMaxSnapshotEntitiesPerPacket;
-    const std::size_t chunk_count =
-        total_entities == 0 ? 1 : (total_entities + max_per_packet - 1) / max_per_packet;
+    const auto current_entities = BuildCurrentSnapshotEntities();
+    const auto changed_entities = CollectChangedEntities(current_entities);
+    const auto encoding_mode = ChooseSnapshotEncoding(current_entities, changed_entities);
+    const auto& entities_to_send =
+        encoding_mode == xdpg::SnapshotEncodingMode::Full ? current_entities : changed_entities;
+    const std::size_t total_entities = current_entities.size();
+    const std::size_t max_per_packet = xdpg::MaxSnapshotEntitiesPerPacket(encoding_mode);
+    const std::size_t chunk_count = entities_to_send.empty()
+                                        ? 1
+                                        : (entities_to_send.size() + max_per_packet - 1) /
+                                              max_per_packet;
 
     // snapshot chunking：同一个 server_tick 的完整状态会拆成多个 UDP 包。
     // 每个包仍然小于 1200 字节，viewer/client 通过 chunk_index/chunk_count 重组。
     for (std::size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
         const std::size_t begin = chunk_index * max_per_packet;
-        const std::size_t end = (begin + max_per_packet < total_entities)
+        const std::size_t end = begin + max_per_packet < entities_to_send.size()
                                     ? begin + max_per_packet
-                                    : total_entities;
+                                    : entities_to_send.size();
 
         xdpg::SnapshotPayload snapshot;
         snapshot.server_tick = world_.tick();
         snapshot.last_processed_input_sequence = world_.last_processed_input_sequence();
+        snapshot.encoding_mode = encoding_mode;
         snapshot.chunk_index = static_cast<std::uint16_t>(chunk_index);
         snapshot.chunk_count = static_cast<std::uint16_t>(chunk_count);
         snapshot.total_entity_count = static_cast<std::uint16_t>(total_entities);
         snapshot.entities.reserve(end - begin);
 
         for (std::size_t i = begin; i < end; ++i) {
-            const auto& state = states[i];
-            xdpg::EntitySnapshot entity;
-            entity.entity_id = state.entity_id;
-            entity.entity_type = ToProtocolEntityType(state.kind);
-            // interacting flag 让 viewer/client 能区分“普通灰色 cube”和“正在被玩家影响的 cube”。
-            entity.flags = state.is_interacting ? xdpg::kEntityFlagInteracting : 0;
-            entity.position[0] = ToFloat(state.position.x);
-            entity.position[1] = ToFloat(state.position.y);
-            entity.position[2] = ToFloat(state.position.z);
-            entity.rotation[0] = ToFloat(state.rotation.x);
-            entity.rotation[1] = ToFloat(state.rotation.y);
-            entity.rotation[2] = ToFloat(state.rotation.z);
-            entity.rotation[3] = ToFloat(state.rotation.w);
-            // render snapshot 不再发送线速度/角速度。后续如果需要调试物理能量、
-            // 插值或预测，可以新增 DebugSnapshot 或按需字段，而不是让公网 viewer 背负调试带宽。
-            snapshot.entities.push_back(entity);
+            snapshot.entities.push_back(entities_to_send[i]);
         }
 
         const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
@@ -253,6 +315,11 @@ void DsServer::SendSnapshot() {
             }
         }
     }
+
+    previous_snapshot_entities_ = current_entities;
+    has_previous_snapshot_ = true;
+    snapshots_since_full_ =
+        encoding_mode == xdpg::SnapshotEncodingMode::Full ? 0 : snapshots_since_full_ + 1;
 }
 
 void DsServer::LogStatsIfDue() {
@@ -311,6 +378,84 @@ void DsServer::RemoveStaleClients() {
                            return now - client.last_seen > kClientTimeout;
                        }),
         clients_.end());
+}
+
+std::vector<xdpg::EntitySnapshot> DsServer::BuildCurrentSnapshotEntities() const {
+    const auto states = world_.CollectEntityStates();
+    std::vector<xdpg::EntitySnapshot> entities;
+    entities.reserve(states.size());
+
+    for (const auto& state : states) {
+        xdpg::EntitySnapshot entity;
+        entity.entity_id = state.entity_id;
+        entity.entity_type = ToProtocolEntityType(state.kind);
+        // interacting flag 让 viewer/client 能区分“普通灰色 cube”和“正在被玩家影响的 cube”。
+        entity.flags = state.is_interacting ? xdpg::kEntityFlagInteracting : 0;
+        entity.position[0] = ToFloat(state.position.x);
+        entity.position[1] = ToFloat(state.position.y);
+        entity.position[2] = ToFloat(state.position.z);
+        entity.rotation[0] = ToFloat(state.rotation.x);
+        entity.rotation[1] = ToFloat(state.rotation.y);
+        entity.rotation[2] = ToFloat(state.rotation.z);
+        entity.rotation[3] = ToFloat(state.rotation.w);
+        // render snapshot 不再发送线速度/角速度。后续如果需要调试物理能量、
+        // 插值或预测，可以新增 DebugSnapshot 或按需字段，而不是让公网 viewer 背负调试带宽。
+        entities.push_back(entity);
+    }
+
+    std::sort(entities.begin(), entities.end(), [](const auto& lhs, const auto& rhs) {
+        return DenseIndexFromEntityId(lhs.entity_id) < DenseIndexFromEntityId(rhs.entity_id);
+    });
+    return entities;
+}
+
+std::vector<xdpg::EntitySnapshot> DsServer::CollectChangedEntities(
+    const std::vector<xdpg::EntitySnapshot>& current) const {
+    if (!has_previous_snapshot_ || previous_snapshot_entities_.size() != current.size()) {
+        return current;
+    }
+
+    std::vector<xdpg::EntitySnapshot> changed;
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        if (SnapshotEntityChanged(previous_snapshot_entities_[i], current[i])) {
+            changed.push_back(current[i]);
+        }
+    }
+    return changed;
+}
+
+xdpg::SnapshotEncodingMode DsServer::ChooseSnapshotEncoding(
+    const std::vector<xdpg::EntitySnapshot>& current,
+    const std::vector<xdpg::EntitySnapshot>& changed) const {
+    // 每秒强制发送一次 full keyframe，用来让新 viewer 建立基线，也让 UDP 丢包造成的
+    // delta 状态漂移可以自动恢复。第一版不做可靠重传，先用周期性 full 保守兜底。
+    if (!has_previous_snapshot_ ||
+        snapshots_since_full_ >= config_.snapshot_rate ||
+        previous_snapshot_entities_.size() != current.size()) {
+        return xdpg::SnapshotEncodingMode::Full;
+    }
+
+    xdpg::SnapshotEncodingMode best_mode = xdpg::SnapshotEncodingMode::Full;
+    std::size_t best_cost = ChunkedSnapshotCost(best_mode, current.size());
+
+    if (CanUseOffsetEncoding(changed, xdpg::SnapshotEncodingMode::DeltaOffsetU8)) {
+        const std::size_t cost =
+            ChunkedSnapshotCost(xdpg::SnapshotEncodingMode::DeltaOffsetU8, changed.size());
+        if (cost < best_cost) {
+            best_cost = cost;
+            best_mode = xdpg::SnapshotEncodingMode::DeltaOffsetU8;
+        }
+    }
+
+    if (CanUseOffsetEncoding(changed, xdpg::SnapshotEncodingMode::DeltaOffsetU16)) {
+        const std::size_t cost =
+            ChunkedSnapshotCost(xdpg::SnapshotEncodingMode::DeltaOffsetU16, changed.size());
+        if (cost < best_cost) {
+            best_mode = xdpg::SnapshotEncodingMode::DeltaOffsetU16;
+        }
+    }
+
+    return best_mode;
 }
 
 }  // namespace xdpg::server

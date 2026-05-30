@@ -87,6 +87,8 @@ void TestSnapshotRoundTrip() {
     Require(decoded.payload.last_processed_input_sequence ==
                 snapshot.last_processed_input_sequence,
             "last_processed_input_sequence mismatch");
+    Require(decoded.payload.encoding_mode == xdpg::SnapshotEncodingMode::Full,
+            "snapshot encoding mode mismatch");
     Require(decoded.payload.chunk_index == 0, "snapshot chunk_index mismatch");
     Require(decoded.payload.chunk_count == 1, "snapshot chunk_count mismatch");
     Require(decoded.payload.total_entity_count == 2, "snapshot total_entity_count mismatch");
@@ -103,6 +105,53 @@ void TestSnapshotRoundTrip() {
                 "render snapshot should not carry linear velocity");
     Require(decoded.payload.entities[1].entity_id == 1000, "small cube entity_id mismatch");
     RequireNear(decoded.payload.entities[1].position[2], 9.5f, 0.01f, "small cube z mismatch");
+}
+
+void TestDeltaSnapshotRoundTrip() {
+    xdpg::SnapshotPayload snapshot;
+    snapshot.server_tick = 61;
+    snapshot.last_processed_input_sequence = 1002;
+    snapshot.encoding_mode = xdpg::SnapshotEncodingMode::DeltaOffsetU8;
+    snapshot.chunk_index = 0;
+    snapshot.chunk_count = 1;
+    snapshot.total_entity_count = 181;
+
+    xdpg::EntitySnapshot player;
+    player.entity_id = 1;
+    player.entity_type = xdpg::EntityType::PlayerCube;
+    player.position[0] = 2.0f;
+    player.position[1] = 1.5f;
+    player.position[2] = -1.0f;
+    player.rotation[3] = 1.0f;
+
+    xdpg::EntitySnapshot cube;
+    cube.entity_id = 1002;
+    cube.entity_type = xdpg::EntityType::SmallCube;
+    cube.flags = xdpg::kEntityFlagInteracting;
+    cube.position[0] = 4.0f;
+    cube.position[1] = 0.25f;
+    cube.position[2] = 8.0f;
+    cube.rotation[0] = 0.38268343f;
+    cube.rotation[3] = 0.9238795f;
+
+    snapshot.entities.push_back(player);
+    snapshot.entities.push_back(cube);
+
+    const auto packet = xdpg::EncodeSnapshot(12, snapshot);
+    Require(packet.size() == 72, "DELTA SNAPSHOT packet size should be 72 bytes");
+
+    const auto decoded = xdpg::DecodeSnapshot(packet.data(), packet.size());
+    Require(decoded.error == xdpg::DecodeError::None, "DELTA SNAPSHOT decode should succeed");
+    Require(decoded.payload.encoding_mode == xdpg::SnapshotEncodingMode::DeltaOffsetU8,
+            "delta encoding mode mismatch");
+    Require(decoded.payload.total_entity_count == 181, "delta total entity count mismatch");
+    Require(decoded.payload.entities.size() == 2, "delta entity count mismatch");
+    Require(decoded.payload.entities[0].entity_id == 1, "delta player id mismatch");
+    Require(decoded.payload.entities[1].entity_id == 1002, "delta cube id mismatch");
+    Require(decoded.payload.entities[1].flags == xdpg::kEntityFlagInteracting,
+            "delta cube flags mismatch");
+    RequireNear(decoded.payload.entities[1].position[2], 8.0f, 0.01f,
+                "delta cube z mismatch");
 }
 
 void TestHeaderValidation() {
@@ -148,6 +197,7 @@ int main() {
     try {
         TestInputRoundTrip();
         TestSnapshotRoundTrip();
+        TestDeltaSnapshotRoundTrip();
         TestHeaderValidation();
         TestPingPongRoundTrip();
     } catch (const std::exception& e) {

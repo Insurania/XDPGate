@@ -107,6 +107,17 @@ cmake --build build --target xdpg_server
 位置为 `uint16[3]` 量化，旋转为最小三项 `uint16[3]`，不发送线速度/角速度。
 单个 entity 从早期调试格式的 60 字节降到 21 字节。
 
+server 还会在运行时动态选择 snapshot 编码：
+
+- `Full`：发送完整实体状态，周期性作为 keyframe。
+- `DeltaOffsetU8`：只发送变化实体，并用 `uint8` 表示相对上一个变化实体的 dense
+  index offset。
+- `DeltaOffsetU16`：当 offset 放不进 `uint8` 时使用。
+
+viewer 收到 Full 后建立完整缓存，后续 Delta 只更新变化 cube。这样在 180 个 small
+cube、60Hz 的场景下，多数帧只需要 1 个 snapshot chunk；周期性 Full keyframe 用于
+新 viewer 建立基线和修正 UDP 丢包导致的短暂状态漂移。
+
 腾讯云轻量服务器只有 5Mbps 带宽。`180` 个 small cube 在 60Hz snapshot 下仍会产生
 较多 UDP 包，适合功能验证，不适合长时间公网高频测试。
 

@@ -24,6 +24,9 @@ constexpr std::size_t kSnapshotPayloadHeaderSize = 24;
 constexpr std::size_t kEntitySnapshotWireSize = 21;
 constexpr std::size_t kMaxSnapshotEntitiesPerPacket =
     (kMaxUdpPayloadSize - kHeaderSize - kSnapshotPayloadHeaderSize) / kEntitySnapshotWireSize;
+constexpr std::size_t kDeltaSnapshotEntityStateWireSize = 15;
+constexpr std::size_t kDeltaSnapshotOffsetU8WireSize = 1 + kDeltaSnapshotEntityStateWireSize;
+constexpr std::size_t kDeltaSnapshotOffsetU16WireSize = 2 + kDeltaSnapshotEntityStateWireSize;
 
 // 位置量化范围。项目物理坐标是 Y-up，所以这里的 vertical range 对应 position[1]。
 // 用户口径里的“z 轴高度 [0,32]”在当前代码中映射为 Y 轴高度。
@@ -48,6 +51,12 @@ enum class EntityType : std::uint16_t {
     PlayerCube = 1,
     SmallCube = 2,
     StaticGround = 3,
+};
+
+enum class SnapshotEncodingMode : std::uint16_t {
+    Full = 0,
+    DeltaOffsetU8 = 1,
+    DeltaOffsetU16 = 2,
 };
 
 enum class DecodeError {
@@ -103,9 +112,11 @@ struct EntitySnapshot {
 struct SnapshotPayload {
     std::uint64_t server_tick = 0;
     std::uint32_t last_processed_input_sequence = 0;
+    SnapshotEncodingMode encoding_mode = SnapshotEncodingMode::Full;
 
     // chunk_* 字段描述当前 UDP 包在完整 snapshot 中的位置。
-    // entity_count 表示本包实体数；total_entity_count 表示同一 server_tick 的完整实体数。
+    // entity_count 表示本包实体数；total_entity_count 表示当前世界的完整实体数。
+    // Full 模式下 entities 是完整状态；Delta* 模式下 entities 只包含变化实体。
     std::uint16_t chunk_index = 0;
     std::uint16_t chunk_count = 1;
     std::uint16_t total_entity_count = 0;
@@ -155,6 +166,10 @@ struct DecodedPong {
 
 const char* DecodeErrorName(DecodeError error);
 const char* PacketTypeName(PacketType packet_type);
+const char* SnapshotEncodingModeName(SnapshotEncodingMode mode);
+
+std::size_t SnapshotEntityWireSize(SnapshotEncodingMode mode);
+std::size_t MaxSnapshotEntitiesPerPacket(SnapshotEncodingMode mode);
 
 std::vector<std::uint8_t> EncodeInput(std::uint32_t sequence, const InputPayload& payload);
 DecodedInput DecodeInput(const std::uint8_t* data, std::size_t size);
