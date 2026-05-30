@@ -108,6 +108,45 @@ cmake --build build --target xdpg_server
 云服务器测试前，需要在腾讯云防火墙/安全组里放行对应 UDP 端口，例如
 `40000/udp`。如果本地客户端连不上，优先检查云防火墙，再检查 Ubuntu 防火墙。
 
+## 启动 Toy Client
+
+`xdpg_toy_client` 是第一版命令行客户端，用于验证“客户端 input -> server ODE
+模拟 -> snapshot 分包返回”的 UDP 主链路。它暂时不渲染画面，只打印收发统计。
+
+Windows 本地连接本机 server：
+
+```powershell
+cmake --build build --config Debug --target xdpg_toy_client
+.\build\client\Debug\xdpg_toy_client.exe --server 127.0.0.1 --port 40000
+```
+
+控制方式：
+
+```text
+W/A/S/D: 按住移动
+Space: boost
+Ctrl+C: 退出
+```
+
+无人值守验证可以使用 scripted 模式，客户端会自动发送移动输入并在指定时间后退出：
+
+```powershell
+.\build\client\Debug\xdpg_toy_client.exe --server 127.0.0.1 --port 40000 --duration-sec 3 --scripted
+```
+
+云服务器验证时，在服务器上运行 `xdpg_server`，本地用公网 IP 连接：
+
+```powershell
+.\build\client\Debug\xdpg_toy_client.exe --server <云服务器公网IP> --port 40000 --scripted
+```
+
+如果输出里 `completed_snapshots` 持续增长，说明 snapshot 分包已经能完整回到客户端。
+如果只有 `sent_inputs` 增长而没有 `rx`，优先检查腾讯云安全组是否放行 UDP 端口。
+
+当前 server 支持多个 toy client 订阅同一个权威世界的 snapshot，但还不是多人游戏：
+所有客户端输入都会影响同一个 player cube。这个设计是为了先验证 UDP 入口、snapshot
+分包和云服务器连通性；多 player entity、房间和输入归属会在后续阶段再拆出来。
+
 ## ODE 本地依赖
 
 Windows 本地可以把 ODE 安装在项目目录下：

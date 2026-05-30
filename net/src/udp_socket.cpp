@@ -1,4 +1,4 @@
-#include "xdpg/server/net/udp_socket.h"
+#include "xdpg/net/udp_socket.h"
 
 #include <cstring>
 #include <sstream>
@@ -12,7 +12,7 @@
 #include <unistd.h>
 #endif
 
-namespace xdpg::server {
+namespace xdpg::net {
 namespace {
 
 #if defined(_WIN32)
@@ -39,7 +39,6 @@ private:
 
 WinsockRuntime& GetWinsockRuntime() {
     // 函数内 static 在 C++11 之后是线程安全初始化。
-    // 当前 server 单线程使用，但这样写后续扩展也不会重复初始化 Winsock。
     static WinsockRuntime runtime;
     return runtime;
 }
@@ -67,6 +66,32 @@ bool IsWouldBlock() {
 }  // namespace
 
 Endpoint::Endpoint() = default;
+
+bool Endpoint::FromIpv4(const std::string& host, std::uint16_t port, Endpoint* endpoint,
+                        std::string* error) {
+    if (endpoint == nullptr) {
+        if (error != nullptr) {
+            *error = "endpoint output is null";
+        }
+        return false;
+    }
+
+    Endpoint result;
+    auto* addr = reinterpret_cast<sockaddr_in*>(&result.storage_);
+    addr->sin_family = AF_INET;
+    addr->sin_port = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &addr->sin_addr) != 1) {
+        if (error != nullptr) {
+            *error = "invalid IPv4 address: " + host;
+        }
+        return false;
+    }
+
+    result.length_ = sizeof(sockaddr_in);
+    result.valid_ = true;
+    *endpoint = result;
+    return true;
+}
 
 std::string Endpoint::ToString() const {
     if (!valid_) {
@@ -119,7 +144,7 @@ bool UdpSocket::Open(std::uint16_t port, std::string* error) {
     setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
                sizeof(reuse));
 
-    // 第一阶段只绑定 IPv4 INADDR_ANY。XDP 第一版也会先按 IPv4 UDP 做早期过滤。
+    // 第一阶段只绑定 IPv4。port=0 时系统会分配临时本地端口，适合 client。
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -189,7 +214,7 @@ bool UdpSocket::Send(const std::uint8_t* data, std::size_t size, const Endpoint&
     }
 
     // UDP datagram 要么作为一个 packet 发送，要么失败；如果 sendto 返回短写，
-    // 这里也当成错误处理，避免上层误以为 snapshot 已完整发出。
+    // 这里也当成错误处理，避免上层误以为 packet 已完整发出。
     const int sent = sendto(socket_, reinterpret_cast<const char*>(data), static_cast<int>(size),
                             0, to.addr(), to.length());
     if (sent < 0 || static_cast<std::size_t>(sent) != size) {
@@ -224,4 +249,5 @@ bool UdpSocket::SetNonBlocking(std::string* error) {
     return true;
 }
 
-}  // namespace xdpg::server
+}  // namespace xdpg::net
+

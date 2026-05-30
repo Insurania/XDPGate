@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -13,14 +12,16 @@
 #include <sys/socket.h>
 #endif
 
-namespace xdpg::server {
+namespace xdpg::net {
 
 // Endpoint 是 sockaddr_storage 的轻量封装。
-// 现在 server 只绑定 IPv4 UDP，但这里使用 sockaddr_storage，是为了后续扩展 IPv6
-// 或从不同 socket API 收到地址时不用改上层 DS 逻辑。
+// 现在先支持 IPv4 UDP；用 sockaddr_storage 是为了后续扩展 IPv6 时不改上层逻辑。
 class Endpoint {
 public:
     Endpoint();
+
+    static bool FromIpv4(const std::string& host, std::uint16_t port, Endpoint* endpoint,
+                         std::string* error);
 
     const sockaddr* addr() const {
         return reinterpret_cast<const sockaddr*>(&storage_);
@@ -42,9 +43,9 @@ private:
     bool valid_ = false;
 };
 
-// 第一阶段的普通 UDP socket 封装。
+// 普通 UDP socket 封装。
 // 目标不是隐藏所有平台差异，而是把 Windows Winsock / Linux fd 的差异挡在 net 层，
-// 让 app 层只面对 Open/Receive/Send 三个动作。
+// 让 server/client 只面对 Open/Receive/Send 三个动作。
 class UdpSocket {
 public:
     UdpSocket();
@@ -53,6 +54,7 @@ public:
     UdpSocket(const UdpSocket&) = delete;
     UdpSocket& operator=(const UdpSocket&) = delete;
 
+    // port=0 表示让系统分配临时本地端口，适合 toy_client。
     bool Open(std::uint16_t port, std::string* error);
     void Close();
 
@@ -60,7 +62,7 @@ public:
     // >0: 收到的字节数；0: 当前没有可读 UDP 包；<0: socket 错误。
     //
     // socket 被设置为 non-blocking。调用方可以在一帧内反复 Receive，
-    // 直到返回 0，再去推进 simulation，避免单次只读一个包造成积压。
+    // 直到返回 0，再处理本轮逻辑。
     int Receive(std::uint8_t* buffer, std::size_t capacity, Endpoint* from, std::string* error);
 
     // UDP sendto 可能失败，例如目标 endpoint 无效、网络不可达、socket 已关闭。
@@ -80,4 +82,5 @@ private:
     SocketHandle socket_ = kInvalidSocket;
 };
 
-}  // namespace xdpg::server
+}  // namespace xdpg::net
+

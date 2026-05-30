@@ -106,7 +106,7 @@ int DsServer::Run(const std::atomic_bool& stop_requested) {
 void DsServer::DrainSocket() {
     std::array<std::uint8_t, xdpg::kMaxUdpPayloadSize> buffer{};
     for (;;) {
-        Endpoint from;
+        net::Endpoint from;
         std::string error;
         const int received = socket_.Receive(buffer.data(), buffer.size(), &from, &error);
         if (received == 0) {
@@ -123,7 +123,7 @@ void DsServer::DrainSocket() {
     }
 }
 
-void DsServer::HandlePacket(const std::uint8_t* data, std::size_t size, const Endpoint& from) {
+void DsServer::HandlePacket(const std::uint8_t* data, std::size_t size, const net::Endpoint& from) {
     // 先只解公共 header，可以快速过滤明显非法包，也避免把错误 packet 交给
     // packet-specific decoder 产生误导性的错误原因。
     const auto header = xdpg::DecodeHeaderOnly(data, size);
@@ -146,7 +146,7 @@ void DsServer::HandlePacket(const std::uint8_t* data, std::size_t size, const En
     }
 }
 
-void DsServer::HandleInput(const std::uint8_t* data, std::size_t size, const Endpoint& from) {
+void DsServer::HandleInput(const std::uint8_t* data, std::size_t size, const net::Endpoint& from) {
     const auto decoded = xdpg::DecodeInput(data, size);
     if (decoded.error != xdpg::DecodeError::None) {
         ++counters_.invalid_packets;
@@ -159,19 +159,20 @@ void DsServer::HandleInput(const std::uint8_t* data, std::size_t size, const End
     latest_input_.move_x = decoded.payload.move_x;
     latest_input_.move_z = decoded.payload.move_z;
     latest_input_.buttons = decoded.payload.buttons;
-    // 最近给 server 发送合法 input 的 endpoint 被认为是当前 snapshot 目标。
-    // 这让本地 toy client 不需要额外注册流程。
-    latest_client_ = from;
-    has_client_ = true;
+    // 第一阶段没有单独的登录/注册包。任何发来合法 INPUT 的 endpoint 都被加入
+    // snapshot 订阅列表，方便本地同时开多个 toy_client 观察同一个权威世界。
+    RegisterClient(from);
     ++counters_.valid_inputs;
 }
 
-void DsServer::HandlePing(const std::uint8_t* data, std::size_t size, const Endpoint& from) {
+void DsServer::HandlePing(const std::uint8_t* data, std::size_t size, const net::Endpoint& from) {
     const auto decoded = xdpg::DecodePing(data, size);
     if (decoded.error != xdpg::DecodeError::None) {
         ++counters_.invalid_packets;
         return;
     }
+
+    RegisterClient(from);
 
     // PONG 原样带回 client timestamp，并附加 server steady timestamp。
     // 后续工具可以用它估算 RTT 和 server 收包路径是否仍然活着。
@@ -195,7 +196,8 @@ void DsServer::StepSimulation() {
 }
 
 void DsServer::SendSnapshot() {
-    if (!has_client_) {
+    RemoveStaleClients();
+    if (clients_.empty()) {
         return;
     }
 
@@ -245,11 +247,14 @@ void DsServer::SendSnapshot() {
         }
 
         const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
-        std::string error;
-        if (socket_.Send(packet.data(), packet.size(), latest_client_, &error)) {
-            ++counters_.sent_snapshots;
-        } else {
-            std::cerr << "send SNAPSHOT failed: " << error << '\n';
+        for (const auto& client : clients_) {
+            std::string error;
+            if (socket_.Send(packet.data(), packet.size(), client.endpoint, &error)) {
+                ++counters_.sent_snapshots;
+            } else {
+                std::cerr << "send SNAPSHOT failed to " << client.endpoint_key << ": "
+                          << error << '\n';
+            }
         }
     }
 }
@@ -274,11 +279,42 @@ void DsServer::LogStatsIfDue() {
               << " inputs=" << inputs
               << " invalid=" << invalid
               << " snapshots=" << snapshots
-              << " pongs=" << pongs;
-    if (has_client_) {
-        std::cout << " client=" << latest_client_.ToString();
+              << " pongs=" << pongs
+              << " clients=" << clients_.size() << '\n';
+}
+
+void DsServer::RegisterClient(const net::Endpoint& endpoint) {
+    const auto now = std::chrono::steady_clock::now();
+    const std::string key = endpoint.ToString();
+
+    for (auto& client : clients_) {
+        if (client.endpoint_key == key) {
+            client.endpoint = endpoint;
+            client.last_seen = now;
+            return;
+        }
     }
-    std::cout << '\n';
+
+    // 这里先给一个保守上限，避免非法来源疯狂换端口时把内存拖大。
+    // 后续做正式 client table 时，会加入 token/握手/限速和更明确的驱逐策略。
+    constexpr std::size_t kMaxClients = 16;
+    if (clients_.size() >= kMaxClients) {
+        clients_.erase(clients_.begin());
+    }
+
+    clients_.push_back(ClientRecord{endpoint, key, now});
+}
+
+void DsServer::RemoveStaleClients() {
+    const auto now = std::chrono::steady_clock::now();
+    constexpr auto kClientTimeout = std::chrono::seconds(10);
+
+    clients_.erase(
+        std::remove_if(clients_.begin(), clients_.end(),
+                       [now, kClientTimeout](const ClientRecord& client) {
+                           return now - client.last_seen > kClientTimeout;
+                       }),
+        clients_.end());
 }
 
 }  // namespace xdpg::server

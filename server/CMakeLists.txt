@@ -1,7 +1,6 @@
 add_executable(xdpg_server
     src/main.cpp
     src/app/ds_server.cpp
-    src/net/udp_socket.cpp
 )
 
 # server 只暴露自己的 include 目录。protocol/physics 通过 target_link_libraries
@@ -15,13 +14,10 @@ target_link_libraries(xdpg_server
     PRIVATE
         xdpg_protocol
         xdpg_physics
+        xdpg_net
 )
 
 target_compile_features(xdpg_server PRIVATE cxx_std_17)
-
-if(WIN32)
-    target_link_libraries(xdpg_server PRIVATE ws2_32)
-endif()
 
 if(MSVC)
     target_compile_options(xdpg_server PRIVATE /W4 /utf-8)

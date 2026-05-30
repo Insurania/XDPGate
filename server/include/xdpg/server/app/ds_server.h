@@ -2,12 +2,14 @@
 
 #include "xdpg/physics/input_command.h"
 #include "xdpg/physics/ode_world.h"
-#include "xdpg/server/net/udp_socket.h"
+#include "xdpg/net/udp_socket.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace xdpg::server {
 
@@ -50,16 +52,24 @@ private:
         std::uint64_t sent_pongs = 0;
     };
 
+    struct ClientRecord {
+        net::Endpoint endpoint;
+        std::string endpoint_key;
+        std::chrono::steady_clock::time_point last_seen;
+    };
+
     void DrainSocket();
-    void HandlePacket(const std::uint8_t* data, std::size_t size, const Endpoint& from);
-    void HandleInput(const std::uint8_t* data, std::size_t size, const Endpoint& from);
-    void HandlePing(const std::uint8_t* data, std::size_t size, const Endpoint& from);
+    void HandlePacket(const std::uint8_t* data, std::size_t size, const net::Endpoint& from);
+    void HandleInput(const std::uint8_t* data, std::size_t size, const net::Endpoint& from);
+    void HandlePing(const std::uint8_t* data, std::size_t size, const net::Endpoint& from);
     void StepSimulation();
     void SendSnapshot();
     void LogStatsIfDue();
+    void RegisterClient(const net::Endpoint& endpoint);
+    void RemoveStaleClients();
 
     DsServerConfig config_;
-    UdpSocket socket_;
+    net::UdpSocket socket_;
 
     // 服务端持有唯一权威物理世界。客户端 input 不能直接改 entity transform，
     // 只能通过 latest_input_ 影响下一次 fixed tick 中施加的力/速度变化。
@@ -69,10 +79,9 @@ private:
     // 后续做 prediction/reconciliation 时，应改成按 input_sequence 排队消费。
     physics::InputCommand latest_input_;
 
-    // 最近发送合法 INPUT/PING 的客户端地址。snapshot 只发给这个 endpoint。
-    // 多客户端支持会把这里替换成 client table。
-    Endpoint latest_client_;
-    bool has_client_ = false;
+    // 第一阶段仍然只有一个 player cube；多个客户端只是订阅同一份权威 snapshot。
+    // 这样本地/云服务器可以开两个客户端验证 UDP 收发，而不提前引入房间、玩家实体分配等逻辑。
+    std::vector<ClientRecord> clients_;
 
     // 发送方向的 packet sequence。它是 server-local 序号，不等同于 input_sequence。
     std::uint32_t outbound_sequence_ = 1;

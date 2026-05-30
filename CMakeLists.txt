@@ -11,6 +11,8 @@ list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ode/inst
 enable_testing()
 
 add_subdirectory(protocol)
+add_subdirectory(net)
+add_subdirectory(client)
 
 find_package(ode CONFIG QUIET)
 
