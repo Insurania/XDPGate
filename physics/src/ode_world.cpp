@@ -30,6 +30,7 @@ constexpr double kAttractionForce = 9.0;
 constexpr double kStoppedLinearSpeed = 0.12;
 constexpr double kStoppedAngularSpeed = 0.18;
 constexpr std::uint32_t kStoppedTicksToDeactivate = 45;
+constexpr std::uint32_t kMaxSmallCubeCount = 1024;
 
 double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
@@ -56,8 +57,8 @@ Quat ReadQuat(const dReal* values) {
 }  // namespace
 
 OdeWorld::OdeWorld(const OdeWorldConfig& config) : config_(config) {
-    if (config_.small_cube_count > 256) {
-        throw std::invalid_argument("small_cube_count too large for phase 1 world");
+    if (config_.small_cube_count > kMaxSmallCubeCount) {
+        throw std::invalid_argument("small_cube_count too large; max is 1024");
     }
     if (config_.fixed_dt <= 0.0) {
         throw std::invalid_argument("fixed_dt must be positive");
@@ -201,11 +202,13 @@ void OdeWorld::CreateSmallCubes() {
 
     // 小 cube 以玩家为中心向外铺开，并按距离排序取前 N 个。
     // 这样增多数量时仍然是“围绕玩家都有”，而不是因为遍历顺序只出现在某个方向。
-    constexpr int kGridRadius = 12;
+    const int grid_radius = std::max(
+        12,
+        static_cast<int>(std::ceil(std::sqrt(static_cast<double>(config_.small_cube_count)))));
     constexpr double kSpacing = 0.48;
     constexpr double kCenterGap = 1.25;
-    for (int z = -kGridRadius; z <= kGridRadius; ++z) {
-        for (int x = -kGridRadius; x <= kGridRadius; ++x) {
+    for (int z = -grid_radius; z <= grid_radius; ++z) {
+        for (int x = -grid_radius; x <= grid_radius; ++x) {
             const double world_x = static_cast<double>(x) * kSpacing;
             const double world_z = static_cast<double>(z) * kSpacing;
             if (std::abs(world_x) < kCenterGap && std::abs(world_z) < kCenterGap) {
