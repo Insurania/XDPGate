@@ -240,3 +240,21 @@ viewer 会跟随 snapshot 里带 `kEntityFlagLocalPlayer` 标记的本地 player
 
 注意：`--client-id` 当前主要用于日志和后续协议演进；session 归属以 UDP endpoint 为准。
 所以两个窗口即使用默认 `client_id=1`，也会被 server 分配成两个不同的 player。
+
+### Viewer 插值缓冲
+
+viewer 默认启用 interpolation buffer：它会把收齐并应用 delta 之后的完整 snapshot
+存入一段历史，然后延迟约 100ms 渲染，在相邻 server tick 之间插值 position 和 rotation。
+这样可以把 snapshot 到达时间的轻微抖动转换成更平滑的画面。
+
+```powershell
+# 默认插值模式，适合正常观察
+.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 --interp-delay-ms 100 -notex
+
+# 对照组：直接渲染最新 snapshot，更容易观察 jitter/packet loss 造成的卡顿
+.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 --no-interp -notex
+```
+
+插值缓冲只影响本地显示，不改变 server 权威 ODE world，也不改变 UDP 协议内容。
+后续加入 network simulator 后，可以直接对比默认插值模式和 `--no-interp` 在 latency、
+jitter、loss 下的视觉差异。

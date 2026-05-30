@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <iostream>
 #include <sstream>
@@ -34,6 +35,9 @@ struct ViewerConfig {
     std::uint16_t server_port = 40000;
     std::uint64_t client_id = 1;
     std::uint32_t input_rate = 60;
+    std::uint32_t server_tick_rate = 60;
+    std::uint32_t interpolation_delay_ms = 100;
+    bool interpolation_enabled = true;
 };
 
 struct RenderEntity {
@@ -42,6 +46,12 @@ struct RenderEntity {
     std::uint16_t flags = 0;
     float position[3] = {0.0f, 0.0f, 0.0f};
     float rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+};
+
+struct SnapshotFrame {
+    std::uint64_t tick = 0;
+    std::chrono::steady_clock::time_point received_at;
+    std::vector<RenderEntity> entities;
 };
 
 struct SnapshotAssembly {
@@ -104,6 +114,8 @@ xdpg::net::UdpSocket g_socket;
 xdpg::net::Endpoint g_server_endpoint;
 SnapshotAssembly g_snapshot_assembly;
 std::vector<RenderEntity> g_entities;
+std::vector<RenderEntity> g_render_entities;
+std::deque<SnapshotFrame> g_snapshot_history;
 bool g_has_full_snapshot = false;
 std::uint32_t g_packet_sequence = 1;
 std::uint32_t g_input_sequence = 1;
@@ -152,6 +164,211 @@ std::string FormatMbps(double bytes_per_second) {
     out.precision(3);
     out << (bytes_per_second * 8.0 / 1000000.0);
     return out.str();
+}
+
+float Clamp01(float value) {
+    return std::max(0.0f, std::min(1.0f, value));
+}
+
+float Lerp(float a, float b, float alpha) {
+    return a + (b - a) * alpha;
+}
+
+void NormalizeQuaternion(float q[4]) {
+    const float length_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    if (length_sq <= 0.000001f) {
+        q[0] = 0.0f;
+        q[1] = 0.0f;
+        q[2] = 0.0f;
+        q[3] = 1.0f;
+        return;
+    }
+
+    const float inv_length = 1.0f / std::sqrt(length_sq);
+    q[0] *= inv_length;
+    q[1] *= inv_length;
+    q[2] *= inv_length;
+    q[3] *= inv_length;
+}
+
+void SlerpQuaternion(const float from[4], const float to[4], float alpha, float out[4]) {
+    float a[4] = {from[0], from[1], from[2], from[3]};
+    float b[4] = {to[0], to[1], to[2], to[3]};
+    NormalizeQuaternion(a);
+    NormalizeQuaternion(b);
+
+    float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (dot < 0.0f) {
+        // q 和 -q 表示同一个旋转。翻转到较短弧线，避免 cube 插值时突然转一大圈。
+        dot = -dot;
+        for (float& value : b) {
+            value = -value;
+        }
+    }
+
+    alpha = Clamp01(alpha);
+    if (dot > 0.9995f) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            out[i] = Lerp(a[i], b[i], alpha);
+        }
+        NormalizeQuaternion(out);
+        return;
+    }
+
+    dot = std::max(-1.0f, std::min(1.0f, dot));
+    const float theta0 = std::acos(dot);
+    const float sin_theta0 = std::sin(theta0);
+    const float theta = theta0 * alpha;
+    const float sin_theta = std::sin(theta);
+    const float scale_a = std::cos(theta) - dot * sin_theta / sin_theta0;
+    const float scale_b = sin_theta / sin_theta0;
+
+    for (std::size_t i = 0; i < 4; ++i) {
+        out[i] = a[i] * scale_a + b[i] * scale_b;
+    }
+    NormalizeQuaternion(out);
+}
+
+RenderEntity ToRenderEntity(const xdpg::EntitySnapshot& snapshot_entity) {
+    RenderEntity entity;
+    entity.entity_id = snapshot_entity.entity_id;
+    entity.entity_type = snapshot_entity.entity_type;
+    entity.flags = snapshot_entity.flags;
+    std::copy(std::begin(snapshot_entity.position),
+              std::end(snapshot_entity.position),
+              std::begin(entity.position));
+    std::copy(std::begin(snapshot_entity.rotation),
+              std::end(snapshot_entity.rotation),
+              std::begin(entity.rotation));
+    return entity;
+}
+
+const RenderEntity* FindEntityById(
+    const std::vector<RenderEntity>& entities,
+    std::uint32_t entity_id) {
+    const auto it = std::find_if(entities.begin(), entities.end(),
+                                 [entity_id](const RenderEntity& entity) {
+                                     return entity.entity_id == entity_id;
+                                 });
+    return it == entities.end() ? nullptr : &*it;
+}
+
+void StoreSnapshotFrame(std::uint64_t tick) {
+    if (!g_has_full_snapshot) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!g_snapshot_history.empty() && g_snapshot_history.back().tick == tick) {
+        g_snapshot_history.back().entities = g_entities;
+        g_snapshot_history.back().received_at = now;
+    } else if (g_snapshot_history.empty() || tick > g_snapshot_history.back().tick) {
+        g_snapshot_history.push_back(SnapshotFrame{tick, now, g_entities});
+    } else {
+        // 当前 assembly 只保留最新 tick，理论上不会走到这里；保留保护是为了防 UDP 乱序尾包。
+        return;
+    }
+
+    const std::size_t max_history_frames =
+        std::max<std::size_t>(120, static_cast<std::size_t>(g_config.server_tick_rate) * 2u);
+    while (g_snapshot_history.size() > max_history_frames) {
+        g_snapshot_history.pop_front();
+    }
+}
+
+std::uint64_t InterpolationDelayTicks() {
+    if (!g_config.interpolation_enabled || g_config.server_tick_rate == 0) {
+        return 0;
+    }
+
+    const std::uint64_t numerator =
+        static_cast<std::uint64_t>(g_config.interpolation_delay_ms) *
+        static_cast<std::uint64_t>(g_config.server_tick_rate);
+    return std::max<std::uint64_t>(1, (numerator + 999u) / 1000u);
+}
+
+std::vector<RenderEntity> InterpolateFrames(
+    const SnapshotFrame& previous,
+    const SnapshotFrame& next,
+    double target_tick) {
+    if (previous.tick >= next.tick) {
+        return next.entities;
+    }
+
+    const float alpha = Clamp01(static_cast<float>(target_tick - static_cast<double>(previous.tick)) /
+                                static_cast<float>(next.tick - previous.tick));
+    std::vector<RenderEntity> result;
+    result.reserve(next.entities.size());
+
+    for (const RenderEntity& next_entity : next.entities) {
+        const RenderEntity* previous_entity =
+            FindEntityById(previous.entities, next_entity.entity_id);
+        if (previous_entity == nullptr ||
+            previous_entity->entity_type != next_entity.entity_type) {
+            result.push_back(next_entity);
+            continue;
+        }
+
+        RenderEntity interpolated = next_entity;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            interpolated.position[axis] =
+                Lerp(previous_entity->position[axis], next_entity.position[axis], alpha);
+        }
+        SlerpQuaternion(previous_entity->rotation, next_entity.rotation, alpha,
+                        interpolated.rotation);
+        result.push_back(interpolated);
+    }
+
+    return result;
+}
+
+void UpdateInterpolatedEntities() {
+    if (!g_config.interpolation_enabled || g_snapshot_history.size() < 2) {
+        g_render_entities = g_entities;
+        return;
+    }
+
+    const SnapshotFrame& latest_frame = g_snapshot_history.back();
+    const double latest_tick = static_cast<double>(latest_frame.tick);
+    const double delay_ticks = static_cast<double>(InterpolationDelayTicks());
+    const double elapsed_since_latest =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      latest_frame.received_at).count();
+
+    // render_tick 故意落后最新权威 tick 一小段时间，但会按本地时钟连续推进。
+    // 这样即使 snapshot 到达时间有轻微 jitter，画面也能从历史帧里平滑取样。
+    double target_tick = latest_tick - delay_ticks +
+                         elapsed_since_latest * static_cast<double>(g_config.server_tick_rate);
+    target_tick = std::max(static_cast<double>(g_snapshot_history.front().tick),
+                           std::min(latest_tick, target_tick));
+
+    if (target_tick <= static_cast<double>(g_snapshot_history.front().tick)) {
+        g_render_entities = g_snapshot_history.front().entities;
+        return;
+    }
+    if (target_tick >= latest_tick) {
+        g_render_entities = g_snapshot_history.back().entities;
+        return;
+    }
+
+    auto next_it = std::lower_bound(
+        g_snapshot_history.begin(), g_snapshot_history.end(), target_tick,
+        [](const SnapshotFrame& frame, double tick) {
+            return frame.tick < tick;
+        });
+    if (next_it == g_snapshot_history.end()) {
+        g_render_entities = g_snapshot_history.back().entities;
+        return;
+    }
+    if (next_it == g_snapshot_history.begin() ||
+        std::fabs(static_cast<double>(next_it->tick) - target_tick) < 0.0001) {
+        g_render_entities = next_it->entities;
+        return;
+    }
+
+    const SnapshotFrame& next = *next_it;
+    const SnapshotFrame& previous = *(next_it - 1);
+    g_render_entities = InterpolateFrames(previous, next, target_tick);
 }
 
 void UpdateRuntimeBandwidthDisplay(
@@ -222,6 +439,9 @@ void PrintUsage(const char* exe) {
               << "  --port <udp_port>          default: 40000\n"
               << "  --client-id <id>           default: 1\n"
               << "  --input-rate <hz>          default: 60\n"
+              << "  --server-tick-rate <hz>    default: 60\n"
+              << "  --interp-delay-ms <ms>     default: 100\n"
+              << "  --no-interp                render latest snapshot directly\n"
               << "  --help                     show this help\n"
               << "Drawstuff example:\n"
               << "  -notex                     disable texture loading\n";
@@ -238,6 +458,10 @@ bool ParseViewerArgs(int argc, char** argv, ViewerConfig* config,
             PrintUsage(argv[0]);
             std::exit(0);
         }
+        if (arg == "--no-interp") {
+            config->interpolation_enabled = false;
+            continue;
+        }
 
         auto require_value = [&](const char* name) -> const char* {
             if (i + 1 >= argc) {
@@ -246,6 +470,24 @@ bool ParseViewerArgs(int argc, char** argv, ViewerConfig* config,
             }
             return argv[++i];
         };
+
+        if (arg == "--server-tick-rate") {
+            const char* value = require_value("--server-tick-rate");
+            if (value == nullptr || !ParseUint32(value, &config->server_tick_rate) ||
+                config->server_tick_rate == 0) {
+                std::cerr << "无效 server-tick-rate\n";
+                return false;
+            }
+            continue;
+        }
+        if (arg == "--interp-delay-ms") {
+            const char* value = require_value("--interp-delay-ms");
+            if (value == nullptr || !ParseUint32(value, &config->interpolation_delay_ms)) {
+                std::cerr << "无效 interp-delay-ms\n";
+                return false;
+            }
+            continue;
+        }
 
         if (arg == "--server") {
             const char* value = require_value("--server");
@@ -347,6 +589,35 @@ void SendPingIfDue() {
     g_next_ping_time += std::chrono::seconds(1);
 }
 
+void ApplyCompletedSnapshot(
+    xdpg::SnapshotEncodingMode encoding_mode,
+    const std::vector<xdpg::EntitySnapshot>& assembled_entities,
+    std::uint64_t server_tick) {
+    if (encoding_mode == xdpg::SnapshotEncodingMode::Full) {
+        g_entities.clear();
+        g_entities.reserve(assembled_entities.size());
+        for (const auto& snapshot_entity : assembled_entities) {
+            g_entities.push_back(ToRenderEntity(snapshot_entity));
+        }
+        g_has_full_snapshot = true;
+    } else if (g_has_full_snapshot) {
+        for (const auto& snapshot_entity : assembled_entities) {
+            auto it = std::find_if(g_entities.begin(), g_entities.end(),
+                                   [&snapshot_entity](const RenderEntity& entity) {
+                                       return entity.entity_id == snapshot_entity.entity_id;
+                                   });
+            if (it == g_entities.end()) {
+                continue;
+            }
+            *it = ToRenderEntity(snapshot_entity);
+        }
+    }
+
+    // 插值缓冲保存的是“已经应用 delta 之后的完整世界状态”，这样渲染阶段不用理解
+    // Full/Delta 差异，只需要在两个完整状态之间做位置/旋转插值。
+    StoreSnapshotFrame(server_tick);
+}
+
 void DrainSocket() {
     std::array<std::uint8_t, xdpg::kMaxUdpPayloadSize> buffer{};
     for (;;) {
@@ -378,43 +649,8 @@ void DrainSocket() {
             ++g_received_snapshot_chunks;
             std::vector<xdpg::EntitySnapshot> assembled_entities;
             if (g_snapshot_assembly.AddChunk(snapshot.payload, &assembled_entities)) {
-                if (snapshot.payload.encoding_mode == xdpg::SnapshotEncodingMode::Full) {
-                    g_entities.clear();
-                    g_entities.reserve(assembled_entities.size());
-                    for (const auto& snapshot_entity : assembled_entities) {
-                        RenderEntity entity;
-                        entity.entity_id = snapshot_entity.entity_id;
-                        entity.entity_type = snapshot_entity.entity_type;
-                        entity.flags = snapshot_entity.flags;
-                        std::copy(std::begin(snapshot_entity.position),
-                                  std::end(snapshot_entity.position),
-                                  std::begin(entity.position));
-                        std::copy(std::begin(snapshot_entity.rotation),
-                                  std::end(snapshot_entity.rotation),
-                                  std::begin(entity.rotation));
-                        g_entities.push_back(entity);
-                    }
-                    g_has_full_snapshot = true;
-                } else if (g_has_full_snapshot) {
-                    for (const auto& snapshot_entity : assembled_entities) {
-                        auto it = std::find_if(g_entities.begin(), g_entities.end(),
-                                               [&snapshot_entity](const RenderEntity& entity) {
-                                                   return entity.entity_id ==
-                                                          snapshot_entity.entity_id;
-                                               });
-                        if (it == g_entities.end()) {
-                            continue;
-                        }
-                        it->entity_type = snapshot_entity.entity_type;
-                        it->flags = snapshot_entity.flags;
-                        std::copy(std::begin(snapshot_entity.position),
-                                  std::end(snapshot_entity.position),
-                                  std::begin(it->position));
-                        std::copy(std::begin(snapshot_entity.rotation),
-                                  std::end(snapshot_entity.rotation),
-                                  std::begin(it->rotation));
-                    }
-                }
+                ApplyCompletedSnapshot(snapshot.payload.encoding_mode, assembled_entities,
+                                       snapshot.payload.server_tick);
                 ++g_completed_snapshots;
             }
         } else if (header.header.packet_type == xdpg::PacketType::Pong) {
@@ -588,10 +824,11 @@ void Step(int pause) {
     SendInputIfDue();
     SendPingIfDue();
     DrainSocket();
+    UpdateInterpolatedEntities();
 
     const RenderEntity* fallback_player = nullptr;
     const RenderEntity* local_player = nullptr;
-    for (const auto& entity : g_entities) {
+    for (const auto& entity : g_render_entities) {
         if (entity.entity_type != xdpg::EntityType::PlayerCube) {
             continue;
         }
@@ -610,7 +847,7 @@ void Step(int pause) {
     }
 
     DrawGround();
-    for (const auto& entity : g_entities) {
+    for (const auto& entity : g_render_entities) {
         DrawEntity(entity);
     }
     LogStatsIfDue();
