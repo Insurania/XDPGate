@@ -589,11 +589,24 @@ void Step(int pause) {
     SendPingIfDue();
     DrainSocket();
 
+    const RenderEntity* fallback_player = nullptr;
+    const RenderEntity* local_player = nullptr;
     for (const auto& entity : g_entities) {
-        if (entity.entity_type == xdpg::EntityType::PlayerCube) {
-            UpdateFollowCamera(entity);
+        if (entity.entity_type != xdpg::EntityType::PlayerCube) {
+            continue;
+        }
+        if (fallback_player == nullptr) {
+            fallback_player = &entity;
+        }
+        if ((entity.flags & xdpg::kEntityFlagLocalPlayer) != 0u) {
+            local_player = &entity;
             break;
         }
+    }
+    if (local_player != nullptr) {
+        UpdateFollowCamera(*local_player);
+    } else if (fallback_player != nullptr) {
+        UpdateFollowCamera(*fallback_player);
     }
 
     DrawGround();

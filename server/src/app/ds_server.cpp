@@ -40,10 +40,23 @@ float ToFloat(double value) {
 }
 
 std::uint32_t DenseIndexFromEntityId(std::uint32_t entity_id) {
-    if (entity_id == 1) {
-        return 0;
-    }
-    return entity_id >= 1000 ? entity_id - 999 : entity_id;
+    return xdpg::SnapshotDenseIndexFromEntityId(entity_id);
+}
+
+physics::Vec3 SpawnPositionForPlayer(std::uint32_t player_entity_id) {
+    // 多客户端第一版先用固定出生环，避免新 player 和已有刚体完全重叠。
+    // entity_id 从 1 开始，映射到一圈半径约 2.5m 的点位。
+    constexpr double kSpawnRadius = 2.5;
+    constexpr double kSpawnHeight = 1.5;
+    constexpr double kPi = 3.14159265358979323846;
+    const std::uint32_t slot = player_entity_id - xdpg::kFirstPlayerEntityId;
+    const double angle = static_cast<double>(slot) * (2.0 * kPi / 8.0);
+    const double ring = 1.0 + static_cast<double>(slot / 8u) * 0.7;
+    return physics::Vec3{
+        std::cos(angle) * kSpawnRadius * ring,
+        kSpawnHeight,
+        std::sin(angle) * kSpawnRadius * ring,
+    };
 }
 
 bool SnapshotEntityChanged(const xdpg::EntitySnapshot& previous,
@@ -223,15 +236,18 @@ void DsServer::HandleInput(const std::uint8_t* data, std::size_t size, const net
         return;
     }
 
-    // 第一版采用“最近输入覆盖”策略：client 以 60Hz 发送 input，server 每个 tick
-    // 消费最新值。这不是最终竞技游戏网络模型，但足够验证 DS 权威物理主流程。
-    latest_input_.input_sequence = decoded.payload.input_sequence;
-    latest_input_.move_x = decoded.payload.move_x;
-    latest_input_.move_z = decoded.payload.move_z;
-    latest_input_.buttons = decoded.payload.buttons;
-    // 第一阶段没有单独的登录/注册包。任何发来合法 INPUT 的 endpoint 都被加入
-    // snapshot 订阅列表，方便本地同时开多个 toy_client 观察同一个权威世界。
-    RegisterClient(from);
+    ClientRecord* client = RegisterInputClient(from, decoded.payload.client_id);
+    if (client == nullptr) {
+        return;
+    }
+
+    // 多客户端阶段仍然采用“每个 session 保留最近一次输入”的轻量模型。
+    // 后续做 prediction/reconciliation 时，再把这里替换成按 input_sequence 排队消费。
+    client->latest_input.player_entity_id = client->player_entity_id;
+    client->latest_input.input_sequence = decoded.payload.input_sequence;
+    client->latest_input.move_x = decoded.payload.move_x;
+    client->latest_input.move_z = decoded.payload.move_z;
+    client->latest_input.buttons = decoded.payload.buttons;
     ++counters_.valid_inputs;
 }
 
@@ -242,7 +258,9 @@ void DsServer::HandlePing(const std::uint8_t* data, std::size_t size, const net:
         return;
     }
 
-    RegisterClient(from);
+    if (ClientRecord* client = FindClient(from)) {
+        client->last_seen = std::chrono::steady_clock::now();
+    }
 
     // PONG 原样带回 client timestamp，并附加 server steady timestamp。
     // 后续工具可以用它估算 RTT 和 server 收包路径是否仍然活着。
@@ -261,7 +279,9 @@ void DsServer::HandlePing(const std::uint8_t* data, std::size_t size, const net:
 
 void DsServer::StepSimulation() {
     // input 在这里真正进入权威模拟。注意：packet decode 阶段不直接修改 ODE body。
-    world_.ApplyInput(latest_input_);
+    for (const auto& client : clients_) {
+        world_.ApplyInput(client.latest_input);
+    }
     world_.Step();
 }
 
@@ -293,19 +313,20 @@ void DsServer::SendSnapshot() {
 
         xdpg::SnapshotPayload snapshot;
         snapshot.server_tick = world_.tick();
-        snapshot.last_processed_input_sequence = world_.last_processed_input_sequence();
         snapshot.encoding_mode = encoding_mode;
         snapshot.chunk_index = static_cast<std::uint16_t>(chunk_index);
         snapshot.chunk_count = static_cast<std::uint16_t>(chunk_count);
         snapshot.total_entity_count = static_cast<std::uint16_t>(total_entities);
-        snapshot.entities.reserve(end - begin);
 
-        for (std::size_t i = begin; i < end; ++i) {
-            snapshot.entities.push_back(entities_to_send[i]);
-        }
-
-        const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
         for (const auto& client : clients_) {
+            // 同一个 server tick 的 entity 内容基本一致，但 last_processed_input_sequence
+            // 和 local-player flag 是按客户端定制的，方便每个 viewer 跟随自己的 player。
+            snapshot.last_processed_input_sequence = client.latest_input.input_sequence;
+            snapshot.entities = BuildSnapshotForClient(
+                std::vector<xdpg::EntitySnapshot>(entities_to_send.begin() + begin,
+                                                  entities_to_send.begin() + end),
+                client);
+            const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
             std::string error;
             if (socket_.Send(packet.data(), packet.size(), client.endpoint, &error)) {
                 ++counters_.sent_snapshots;
@@ -346,7 +367,19 @@ void DsServer::LogStatsIfDue() {
               << " clients=" << clients_.size() << '\n';
 }
 
-void DsServer::RegisterClient(const net::Endpoint& endpoint) {
+DsServer::ClientRecord* DsServer::FindClient(const net::Endpoint& endpoint) {
+    const std::string key = endpoint.ToString();
+    for (auto& client : clients_) {
+        if (client.endpoint_key == key) {
+            return &client;
+        }
+    }
+    return nullptr;
+}
+
+DsServer::ClientRecord* DsServer::RegisterInputClient(
+    const net::Endpoint& endpoint,
+    std::uint64_t client_id) {
     const auto now = std::chrono::steady_clock::now();
     const std::string key = endpoint.ToString();
 
@@ -354,18 +387,44 @@ void DsServer::RegisterClient(const net::Endpoint& endpoint) {
         if (client.endpoint_key == key) {
             client.endpoint = endpoint;
             client.last_seen = now;
-            return;
+            client.client_id = client_id;
+            return &client;
         }
     }
 
     // 这里先给一个保守上限，避免非法来源疯狂换端口时把内存拖大。
     // 后续做正式 client table 时，会加入 token/握手/限速和更明确的驱逐策略。
     constexpr std::size_t kMaxClients = 16;
-    if (clients_.size() >= kMaxClients) {
-        clients_.erase(clients_.begin());
+    if (clients_.size() >= kMaxClients ||
+        next_player_entity_id_ >= xdpg::kFirstPlayerEntityId + xdpg::kMaxPlayerEntities) {
+        std::cerr << "refuse new client " << key << ": max player sessions reached\n";
+        return nullptr;
     }
 
-    clients_.push_back(ClientRecord{endpoint, key, now});
+    const std::uint32_t player_entity_id = next_player_entity_id_;
+    if (!world_.AddPlayer(player_entity_id, SpawnPositionForPlayer(player_entity_id))) {
+        std::cerr << "refuse new client " << key << ": failed to create player entity\n";
+        return nullptr;
+    }
+    ++next_player_entity_id_;
+
+    ClientRecord record;
+    record.endpoint = endpoint;
+    record.endpoint_key = key;
+    record.last_seen = now;
+    record.client_id = client_id;
+    record.player_entity_id = player_entity_id;
+    record.latest_input.player_entity_id = player_entity_id;
+    clients_.push_back(record);
+
+    // 新 session 加入后，实体数量发生变化；强制下一帧发 full snapshot，
+    // 让所有 viewer 立即拿到新的 player 列表和自己的 local-player 标记。
+    has_previous_snapshot_ = false;
+
+    std::cout << "[session] client=" << key
+              << " client_id=" << client_id
+              << " player_entity_id=" << player_entity_id << '\n';
+    return &clients_.back();
 }
 
 void DsServer::RemoveStaleClients() {
@@ -407,6 +466,19 @@ std::vector<xdpg::EntitySnapshot> DsServer::BuildCurrentSnapshotEntities() const
         return DenseIndexFromEntityId(lhs.entity_id) < DenseIndexFromEntityId(rhs.entity_id);
     });
     return entities;
+}
+
+std::vector<xdpg::EntitySnapshot> DsServer::BuildSnapshotForClient(
+    const std::vector<xdpg::EntitySnapshot>& entities,
+    const ClientRecord& client) const {
+    std::vector<xdpg::EntitySnapshot> customized = entities;
+    for (auto& entity : customized) {
+        if (entity.entity_type == xdpg::EntityType::PlayerCube &&
+            entity.entity_id == client.player_entity_id) {
+            entity.flags |= xdpg::kEntityFlagLocalPlayer;
+        }
+    }
+    return customized;
 }
 
 std::vector<xdpg::EntitySnapshot> DsServer::CollectChangedEntities(

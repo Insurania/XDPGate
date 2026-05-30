@@ -27,6 +27,7 @@ public:
     OdeWorld(const OdeWorld&) = delete;
     OdeWorld& operator=(const OdeWorld&) = delete;
 
+    bool AddPlayer(std::uint32_t entity_id, const Vec3& spawn_position);
     void ApplyInput(const InputCommand& input);
     void Step();
 
@@ -51,7 +52,7 @@ private:
     static void NearCallback(void* data, dxGeom* geom_a, dxGeom* geom_b);
     void CreateWorld();
     void CreateGround();
-    void CreatePlayerCube();
+    void CreatePlayerCube(std::uint32_t entity_id, const Vec3& spawn_position);
     void CreateSmallCubes();
     DynamicEntity CreateCube(std::uint32_t entity_id, EntityKind kind, double size, double mass,
                              const Vec3& position);
@@ -61,6 +62,8 @@ private:
     void ClampPlayerVelocity();
     DynamicEntity* FindEntityByBody(dxBody* body);
     const DynamicEntity* FindEntityByBody(dxBody* body) const;
+    DynamicEntity* FindEntityById(std::uint32_t entity_id);
+    const DynamicEntity* FindEntityById(std::uint32_t entity_id) const;
     bool IsPlayerBody(dxBody* body) const;
     void MarkSmallCubeInteracted(dxBody* body);
 

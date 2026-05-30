@@ -38,6 +38,15 @@ constexpr float kSnapshotVerticalMaxMeters = 32.0f;
 // EntitySnapshot::flags 的 bit 定义。先保留一个 interacting 状态，
 // 用于表达小 cube 正在被玩家碰撞/吸引影响，viewer 可以据此变色。
 constexpr std::uint16_t kEntityFlagInteracting = 1u << 0u;
+// server 给每个客户端单独打上的标记：表示这个 PlayerCube 是当前客户端自己的角色。
+// 它只影响 viewer 跟随摄像机和本地显示，不参与物理逻辑。
+constexpr std::uint16_t kEntityFlagLocalPlayer = 1u << 1u;
+
+// 第一版 session 系统先给 player 预留固定 dense index 区间，small cube 从 1000 开始。
+// Delta offset 编码依赖这个稳定顺序：player 1..N 在前，small cube 在后。
+constexpr std::uint32_t kMaxPlayerEntities = 16;
+constexpr std::uint32_t kFirstPlayerEntityId = 1;
+constexpr std::uint32_t kSmallCubeEntityIdBase = 1000;
 
 enum class PacketType : std::uint8_t {
     Input = 1,
@@ -170,6 +179,7 @@ const char* SnapshotEncodingModeName(SnapshotEncodingMode mode);
 
 std::size_t SnapshotEntityWireSize(SnapshotEncodingMode mode);
 std::size_t MaxSnapshotEntitiesPerPacket(SnapshotEncodingMode mode);
+std::uint32_t SnapshotDenseIndexFromEntityId(std::uint32_t entity_id);
 
 std::vector<std::uint8_t> EncodeInput(std::uint32_t sequence, const InputPayload& payload);
 DecodedInput DecodeInput(const std::uint8_t* data, std::size_t size);

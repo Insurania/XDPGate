@@ -159,9 +159,23 @@ Ctrl+C: 退出
 如果输出里 `completed_snapshots` 持续增长，说明 snapshot 分包已经能完整回到客户端。
 如果只有 `sent_inputs` 增长而没有 `rx`，优先检查腾讯云安全组是否放行 UDP 端口。
 
-当前 server 支持多个 toy client 订阅同一个权威世界的 snapshot，但还不是多人游戏：
-所有客户端输入都会影响同一个 player cube。这个设计是为了先验证 UDP 入口、snapshot
-分包和云服务器连通性；多 player entity、房间和输入归属会在后续阶段再拆出来。
+当前 server 已经支持最小 session 系统：每个新的 UDP endpoint 第一次发送合法 INPUT 时，
+server 会分配一个新的 PlayerCube。也就是说，你每开一个终端运行一次 toy client 或
+network viewer，都会作为新的 player 加入同一个权威 ODE world。当前上限先保守设为
+16 个 player，后续做登录、房间、token、限速和断线回收时再扩展。
+
+本地两客户端快速验证：
+
+```powershell
+.\build\client\Debug\xdpg_toy_client.exe --server 127.0.0.1 --port 40000 --duration-sec 5 --scripted
+.\build\client\Debug\xdpg_toy_client.exe --server 127.0.0.1 --port 40000 --duration-sec 5 --scripted
+```
+
+两个客户端日志里的 `entities` 应该约等于：
+
+```text
+small_cube_count + player_count
+```
 
 ## ODE 本地依赖
 
@@ -216,12 +230,13 @@ Q 或 Esc: 退出
 鼠标拖动: 调整相机
 ```
 
-也可以开两个 viewer 窗口连接同一个 server：
+也可以开两个 viewer 窗口连接同一个 server。server 会按 UDP endpoint 分配 player，
+viewer 会跟随 snapshot 里带 `kEntityFlagLocalPlayer` 标记的本地 player：
 
 ```powershell
 .\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 --client-id 1 -notex
 .\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 --client-id 2 -notex
 ```
 
-注意：当前还不是多人游戏。多个 viewer 会看到同一个权威 ODE world，并且输入都会作用到
-同一个 player cube。后续再拆多 player entity 和输入归属。
+注意：`--client-id` 当前主要用于日志和后续协议演进；session 归属以 UDP endpoint 为准。
+所以两个窗口即使用默认 `client_id=1`，也会被 server 分配成两个不同的 player。

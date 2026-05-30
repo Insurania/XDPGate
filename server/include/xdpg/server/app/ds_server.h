@@ -57,6 +57,9 @@ private:
         net::Endpoint endpoint;
         std::string endpoint_key;
         std::chrono::steady_clock::time_point last_seen;
+        std::uint64_t client_id = 0;
+        std::uint32_t player_entity_id = 0;
+        physics::InputCommand latest_input;
     };
 
     void DrainSocket();
@@ -66,9 +69,13 @@ private:
     void StepSimulation();
     void SendSnapshot();
     void LogStatsIfDue();
-    void RegisterClient(const net::Endpoint& endpoint);
+    ClientRecord* FindClient(const net::Endpoint& endpoint);
+    ClientRecord* RegisterInputClient(const net::Endpoint& endpoint, std::uint64_t client_id);
     void RemoveStaleClients();
     std::vector<xdpg::EntitySnapshot> BuildCurrentSnapshotEntities() const;
+    std::vector<xdpg::EntitySnapshot> BuildSnapshotForClient(
+        const std::vector<xdpg::EntitySnapshot>& entities,
+        const ClientRecord& client) const;
     std::vector<xdpg::EntitySnapshot> CollectChangedEntities(
         const std::vector<xdpg::EntitySnapshot>& current) const;
     xdpg::SnapshotEncodingMode ChooseSnapshotEncoding(
@@ -82,13 +89,10 @@ private:
     // 只能通过 latest_input_ 影响下一次 fixed tick 中施加的力/速度变化。
     physics::OdeWorld world_;
 
-    // 第一版只保留“最近一次输入”。这足够验证控制链路，但不是最终网络模型。
-    // 后续做 prediction/reconciliation 时，应改成按 input_sequence 排队消费。
-    physics::InputCommand latest_input_;
-
-    // 第一阶段仍然只有一个 player cube；多个客户端只是订阅同一份权威 snapshot。
-    // 这样本地/云服务器可以开两个客户端验证 UDP 收发，而不提前引入房间、玩家实体分配等逻辑。
+    // session 表按 endpoint 区分客户端。每个新 endpoint 第一次发送 INPUT 时，
+    // server 分配一个新的 PlayerCube；同一 endpoint 后续只更新自己的 latest_input。
     std::vector<ClientRecord> clients_;
+    std::uint32_t next_player_entity_id_ = xdpg::kFirstPlayerEntityId;
 
     // 发送方向的 packet sequence。它是 server-local 序号，不等同于 input_sequence。
     std::uint32_t outbound_sequence_ = 1;

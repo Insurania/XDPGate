@@ -5,6 +5,9 @@
 
 #if defined(_WIN32)
 #include <mstcpip.h>
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 #else
 #include <arpa/inet.h>
 #include <cerrno>
@@ -138,6 +141,16 @@ bool UdpSocket::Open(std::uint16_t port, std::string* error) {
         }
         return false;
     }
+
+#if defined(_WIN32)
+    // Windows UDP socket 默认会把 ICMP Port Unreachable 转成下一次 recvfrom 的
+    // WSAECONNRESET。客户端短时启动/退出时这会让本地 server 日志刷屏；
+    // Linux 不会这样表现，所以这里仅在 Windows 上关闭这个行为。
+    BOOL udp_connreset = FALSE;
+    DWORD bytes_returned = 0;
+    WSAIoctl(socket_, SIO_UDP_CONNRESET, &udp_connreset, sizeof(udp_connreset),
+             nullptr, 0, &bytes_returned, nullptr, nullptr);
+#endif
 
     // SO_REUSEADDR 主要方便开发时快速重启 server。
     // 注意它不是 SO_REUSEPORT；真正多 worker 分流会在后续阶段单独实现。

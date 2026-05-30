@@ -16,10 +16,7 @@ constexpr std::size_t kEntitySnapshotSize = kEntitySnapshotWireSize;
 constexpr std::size_t kPingPayloadSize = 8;
 constexpr std::size_t kPongPayloadSize = 16;
 constexpr float kQuaternionSmallestThreeLimit = 0.7071067811865476f;
-constexpr std::uint32_t kPlayerDenseIndex = 0;
-constexpr std::uint32_t kPlayerEntityId = 1;
-constexpr std::uint32_t kSmallCubeDenseIndexBase = 1;
-constexpr std::uint32_t kSmallCubeEntityIdBase = 1000;
+constexpr std::uint32_t kSmallCubeDenseIndexBase = kMaxPlayerEntities;
 
 // 这里不用 reinterpret_cast 直接读写整数，是为了避免 CPU 对齐、结构体 padding、
 // 主机字节序等因素影响网络协议。当前协议固定为 little-endian，小端 helper 是
@@ -302,8 +299,9 @@ bool ReadCompressedRotation(const std::uint8_t* data, std::size_t& offset, float
 }
 
 std::uint32_t DenseIndexFromEntityId(std::uint32_t entity_id) {
-    if (entity_id == kPlayerEntityId) {
-        return kPlayerDenseIndex;
+    if (entity_id >= kFirstPlayerEntityId &&
+        entity_id < kFirstPlayerEntityId + kMaxPlayerEntities) {
+        return entity_id - kFirstPlayerEntityId;
     }
     if (entity_id >= kSmallCubeEntityIdBase) {
         return kSmallCubeDenseIndexBase + (entity_id - kSmallCubeEntityIdBase);
@@ -313,8 +311,8 @@ std::uint32_t DenseIndexFromEntityId(std::uint32_t entity_id) {
 
 EntitySnapshot EntityFromDenseIndex(std::uint32_t dense_index) {
     EntitySnapshot entity;
-    if (dense_index == kPlayerDenseIndex) {
-        entity.entity_id = kPlayerEntityId;
+    if (dense_index < kMaxPlayerEntities) {
+        entity.entity_id = kFirstPlayerEntityId + dense_index;
         entity.entity_type = EntityType::PlayerCube;
     } else {
         entity.entity_id = kSmallCubeEntityIdBase + (dense_index - kSmallCubeDenseIndexBase);
@@ -490,6 +488,10 @@ std::size_t SnapshotEntityWireSize(SnapshotEncodingMode mode) {
 std::size_t MaxSnapshotEntitiesPerPacket(SnapshotEncodingMode mode) {
     return (kMaxUdpPayloadSize - kHeaderSize - kSnapshotPayloadHeaderSize) /
            SnapshotEntityWireSize(mode);
+}
+
+std::uint32_t SnapshotDenseIndexFromEntityId(std::uint32_t entity_id) {
+    return DenseIndexFromEntityId(entity_id);
 }
 
 std::vector<std::uint8_t> EncodeInput(std::uint32_t sequence, const InputPayload& payload) {

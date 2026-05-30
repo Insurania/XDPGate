@@ -10,7 +10,6 @@
 namespace xdpg::physics {
 namespace {
 
-constexpr std::uint32_t kPlayerEntityId = 1;
 constexpr std::uint32_t kSmallCubeEntityIdBase = 1000;
 constexpr double kGravity = -9.81;
 constexpr double kPlayerCubeSize = 1.0;
@@ -67,7 +66,6 @@ OdeWorld::OdeWorld(const OdeWorldConfig& config) : config_(config) {
     dInitODE();
     CreateWorld();
     CreateGround();
-    CreatePlayerCube();
     CreateSmallCubes();
 }
 
@@ -87,12 +85,21 @@ OdeWorld::~OdeWorld() {
     dCloseODE();
 }
 
+bool OdeWorld::AddPlayer(std::uint32_t entity_id, const Vec3& spawn_position) {
+    if (FindEntityById(entity_id) != nullptr) {
+        return false;
+    }
+
+    CreatePlayerCube(entity_id, spawn_position);
+    return true;
+}
+
 void OdeWorld::ApplyInput(const InputCommand& input) {
-    if (entities_.empty()) {
+    DynamicEntity* player = FindEntityById(input.player_entity_id);
+    if (player == nullptr || player->kind != EntityKind::PlayerCube) {
         return;
     }
 
-    DynamicEntity& player = entities_.front();
     const double move_x = Clamp(input.move_x, -1.0, 1.0);
     const double move_z = Clamp(input.move_z, -1.0, 1.0);
     const double length = std::sqrt(move_x * move_x + move_z * move_z);
@@ -101,14 +108,14 @@ void OdeWorld::ApplyInput(const InputCommand& input) {
         // 这样 player cube 推动 small cubes 时，结果仍然由 ODE 碰撞求解决定。
         const double normalized_x = move_x / std::max(1.0, length);
         const double normalized_z = move_z / std::max(1.0, length);
-        dBodyAddForce(player.body, normalized_x * kMoveForce, 0.0, normalized_z * kMoveForce);
+        dBodyAddForce(player->body, normalized_x * kMoveForce, 0.0, normalized_z * kMoveForce);
 
         if ((input.buttons & kBoostButtonMask) != 0u) {
             // ODE C API 没有直接的 AddImpulse 接口。这里用“一次性增加线速度”
             // 近似水平冲量，后续如果需要更严格的动量控制，可以按质量换算成力并
             // 只持续一个 fixed tick。
-            const dReal* velocity = dBodyGetLinearVel(player.body);
-            dBodySetLinearVel(player.body, velocity[0] + normalized_x * kBoostImpulse,
+            const dReal* velocity = dBodyGetLinearVel(player->body);
+            dBodySetLinearVel(player->body, velocity[0] + normalized_x * kBoostImpulse,
                               velocity[1], velocity[2] + normalized_z * kBoostImpulse);
         }
     }
@@ -178,9 +185,9 @@ void OdeWorld::CreateGround() {
     }
 }
 
-void OdeWorld::CreatePlayerCube() {
-    entities_.push_back(CreateCube(kPlayerEntityId, EntityKind::PlayerCube, kPlayerCubeSize,
-                                   kPlayerMass, Vec3{0.0, 1.5, 0.0}));
+void OdeWorld::CreatePlayerCube(std::uint32_t entity_id, const Vec3& spawn_position) {
+    entities_.push_back(CreateCube(entity_id, EntityKind::PlayerCube, kPlayerCubeSize,
+                                   kPlayerMass, spawn_position));
 }
 
 void OdeWorld::CreateSmallCubes() {
@@ -299,26 +306,39 @@ void OdeWorld::HandleCollision(dxGeom* geom_a, dxGeom* geom_b) {
 }
 
 void OdeWorld::ApplyAttractionForces() {
-    if (entities_.empty()) {
-        return;
-    }
-
-    const dReal* player_position = dBodyGetPosition(entities_.front().body);
     for (DynamicEntity& entity : entities_) {
         if (entity.kind != EntityKind::SmallCube) {
             continue;
         }
 
         const dReal* position = dBodyGetPosition(entity.body);
-        const double dx = static_cast<double>(player_position[0] - position[0]);
-        const double dy = static_cast<double>(player_position[1] - position[1]);
-        const double dz = static_cast<double>(player_position[2] - position[2]);
-        const double distance2 = dx * dx + dy * dy + dz * dz;
-        if (distance2 > kAttractionRadius * kAttractionRadius || distance2 <= 0.0001) {
+        const dReal* nearest_player_position = nullptr;
+        double nearest_distance2 = kAttractionRadius * kAttractionRadius;
+
+        for (const DynamicEntity& player : entities_) {
+            if (player.kind != EntityKind::PlayerCube) {
+                continue;
+            }
+
+            const dReal* player_position = dBodyGetPosition(player.body);
+            const double dx = static_cast<double>(player_position[0] - position[0]);
+            const double dy = static_cast<double>(player_position[1] - position[1]);
+            const double dz = static_cast<double>(player_position[2] - position[2]);
+            const double distance2 = dx * dx + dy * dy + dz * dz;
+            if (distance2 < nearest_distance2) {
+                nearest_distance2 = distance2;
+                nearest_player_position = player_position;
+            }
+        }
+
+        if (nearest_player_position == nullptr || nearest_distance2 <= 0.0001) {
             continue;
         }
 
-        const double distance = std::sqrt(distance2);
+        const double dx = static_cast<double>(nearest_player_position[0] - position[0]);
+        const double dy = static_cast<double>(nearest_player_position[1] - position[1]);
+        const double dz = static_cast<double>(nearest_player_position[2] - position[2]);
+        const double distance = std::sqrt(nearest_distance2);
         const double strength = kAttractionForce * (1.0 - distance / kAttractionRadius);
         dBodyAddForce(entity.body, dx / distance * strength, dy / distance * strength,
                       dz / distance * strength);
@@ -357,20 +377,21 @@ void OdeWorld::UpdateInteractionStates() {
 }
 
 void OdeWorld::ClampPlayerVelocity() {
-    if (entities_.empty()) {
-        return;
-    }
+    for (DynamicEntity& player : entities_) {
+        if (player.kind != EntityKind::PlayerCube) {
+            continue;
+        }
 
-    DynamicEntity& player = entities_.front();
-    const dReal* velocity = dBodyGetLinearVel(player.body);
-    const double horizontal_speed =
-        std::sqrt(velocity[0] * velocity[0] + velocity[2] * velocity[2]);
-    if (horizontal_speed <= kMaxPlayerHorizontalSpeed || horizontal_speed <= 0.0001) {
-        return;
-    }
+        const dReal* velocity = dBodyGetLinearVel(player.body);
+        const double horizontal_speed =
+            std::sqrt(velocity[0] * velocity[0] + velocity[2] * velocity[2]);
+        if (horizontal_speed <= kMaxPlayerHorizontalSpeed || horizontal_speed <= 0.0001) {
+            continue;
+        }
 
-    const double scale = kMaxPlayerHorizontalSpeed / horizontal_speed;
-    dBodySetLinearVel(player.body, velocity[0] * scale, velocity[1], velocity[2] * scale);
+        const double scale = kMaxPlayerHorizontalSpeed / horizontal_speed;
+        dBodySetLinearVel(player.body, velocity[0] * scale, velocity[1], velocity[2] * scale);
+    }
 }
 
 OdeWorld::DynamicEntity* OdeWorld::FindEntityByBody(dxBody* body) {
@@ -393,6 +414,24 @@ const OdeWorld::DynamicEntity* OdeWorld::FindEntityByBody(dxBody* body) const {
 
     for (const DynamicEntity& entity : entities_) {
         if (entity.body == body) {
+            return &entity;
+        }
+    }
+    return nullptr;
+}
+
+OdeWorld::DynamicEntity* OdeWorld::FindEntityById(std::uint32_t entity_id) {
+    for (DynamicEntity& entity : entities_) {
+        if (entity.entity_id == entity_id) {
+            return &entity;
+        }
+    }
+    return nullptr;
+}
+
+const OdeWorld::DynamicEntity* OdeWorld::FindEntityById(std::uint32_t entity_id) const {
+    for (const DynamicEntity& entity : entities_) {
+        if (entity.entity_id == entity_id) {
             return &entity;
         }
     }

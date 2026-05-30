@@ -114,7 +114,7 @@ void TestDeltaSnapshotRoundTrip() {
     snapshot.encoding_mode = xdpg::SnapshotEncodingMode::DeltaOffsetU8;
     snapshot.chunk_index = 0;
     snapshot.chunk_count = 1;
-    snapshot.total_entity_count = 181;
+    snapshot.total_entity_count = 182;
 
     xdpg::EntitySnapshot player;
     player.entity_id = 1;
@@ -123,6 +123,15 @@ void TestDeltaSnapshotRoundTrip() {
     player.position[1] = 1.5f;
     player.position[2] = -1.0f;
     player.rotation[3] = 1.0f;
+
+    xdpg::EntitySnapshot second_player;
+    second_player.entity_id = 2;
+    second_player.entity_type = xdpg::EntityType::PlayerCube;
+    second_player.flags = xdpg::kEntityFlagLocalPlayer;
+    second_player.position[0] = -2.0f;
+    second_player.position[1] = 1.5f;
+    second_player.position[2] = -1.0f;
+    second_player.rotation[3] = 1.0f;
 
     xdpg::EntitySnapshot cube;
     cube.entity_id = 1002;
@@ -135,22 +144,26 @@ void TestDeltaSnapshotRoundTrip() {
     cube.rotation[3] = 0.9238795f;
 
     snapshot.entities.push_back(player);
+    snapshot.entities.push_back(second_player);
     snapshot.entities.push_back(cube);
 
     const auto packet = xdpg::EncodeSnapshot(12, snapshot);
-    Require(packet.size() == 72, "DELTA SNAPSHOT packet size should be 72 bytes");
+    Require(packet.size() == 88, "DELTA SNAPSHOT packet size should be 88 bytes");
 
     const auto decoded = xdpg::DecodeSnapshot(packet.data(), packet.size());
     Require(decoded.error == xdpg::DecodeError::None, "DELTA SNAPSHOT decode should succeed");
     Require(decoded.payload.encoding_mode == xdpg::SnapshotEncodingMode::DeltaOffsetU8,
             "delta encoding mode mismatch");
-    Require(decoded.payload.total_entity_count == 181, "delta total entity count mismatch");
-    Require(decoded.payload.entities.size() == 2, "delta entity count mismatch");
+    Require(decoded.payload.total_entity_count == 182, "delta total entity count mismatch");
+    Require(decoded.payload.entities.size() == 3, "delta entity count mismatch");
     Require(decoded.payload.entities[0].entity_id == 1, "delta player id mismatch");
-    Require(decoded.payload.entities[1].entity_id == 1002, "delta cube id mismatch");
-    Require(decoded.payload.entities[1].flags == xdpg::kEntityFlagInteracting,
+    Require(decoded.payload.entities[1].entity_id == 2, "delta second player id mismatch");
+    Require(decoded.payload.entities[1].flags == xdpg::kEntityFlagLocalPlayer,
+            "delta local player flags mismatch");
+    Require(decoded.payload.entities[2].entity_id == 1002, "delta cube id mismatch");
+    Require(decoded.payload.entities[2].flags == xdpg::kEntityFlagInteracting,
             "delta cube flags mismatch");
-    RequireNear(decoded.payload.entities[1].position[2], 8.0f, 0.01f,
+    RequireNear(decoded.payload.entities[2].position[2], 8.0f, 0.01f,
                 "delta cube z mismatch");
 }
 
