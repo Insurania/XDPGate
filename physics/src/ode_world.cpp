@@ -14,16 +14,17 @@ constexpr std::uint32_t kSmallCubeEntityIdBase = 1000;
 constexpr double kGravity = -9.81;
 constexpr double kPlayerCubeSize = 1.0;
 constexpr double kSmallCubeSize = 0.55;
-constexpr double kPlayerMass = 5.0;
+constexpr double kPlayerMass = 3.0;
 constexpr double kSmallCubeMass = 1.0;
-constexpr double kMoveForce = 28.0;
-constexpr double kBoostImpulse = 0.8;
+constexpr double kMoveForce = 95.0;
+constexpr double kBoostImpulse = 1.2;
 constexpr std::uint32_t kBoostButtonMask = 1u << 0u;
 constexpr int kMaxContactsPerPair = 8;
-constexpr double kPlayerLinearDamping = 0.08;
-constexpr double kPlayerAngularDamping = 0.04;
+constexpr double kPlayerLinearDamping = 0.018;
+constexpr double kPlayerAngularDamping = 0.002;
 constexpr double kSmallCubeLinearDamping = 0.02;
 constexpr double kSmallCubeAngularDamping = 0.025;
+constexpr double kMaxPlayerHorizontalSpeed = 5.0;
 
 double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
@@ -114,6 +115,7 @@ void OdeWorld::Step() {
 
     // QuickStep 比完整 Step 更适合实时服务器：速度更快，稳定性足够支撑 toy DS。
     dWorldQuickStep(world_, config_.fixed_dt);
+    ClampPlayerVelocity();
     dJointGroupEmpty(contact_group_);
     ++tick_;
 }
@@ -154,7 +156,7 @@ void OdeWorld::CreateWorld() {
     dWorldSetGravity(world_, 0.0, kGravity, 0.0);
     dWorldSetCFM(world_, 1e-5);
     dWorldSetERP(world_, 0.2);
-    dWorldSetQuickStepNumIterations(world_, 24);
+    dWorldSetQuickStepNumIterations(world_, 32);
     dWorldSetLinearDampingThreshold(world_, 0.0);
     dWorldSetAngularDampingThreshold(world_, 0.0);
 }
@@ -215,9 +217,11 @@ OdeWorld::DynamicEntity OdeWorld::CreateCube(std::uint32_t entity_id, EntityKind
     dMassSetBoxTotal(&ode_mass, mass, size, size, size);
     dBodySetMass(body, &ode_mass);
     dBodySetPosition(body, position.x, position.y, position.z);
+    dBodySetFiniteRotationMode(body, 1);
+    dBodySetMaxAngularSpeed(body, kind == EntityKind::PlayerCube ? 18.0 : 12.0);
     if (kind == EntityKind::PlayerCube) {
-        // player cube 需要像游戏角色一样“松手后较快停下”，否则会像冰面一样滑很远。
-        // small cubes 仍保留较低阻尼，方便观察被推动、滚动和翻倒。
+        // player cube 的移动力会比较强，靠摩擦和接触点把线性运动转成翻滚。
+        // 线速度由 ClampPlayerVelocity 限制，角速度则尽量保留，方便观察 tumbling。
         dBodySetDamping(body, kPlayerLinearDamping, kPlayerAngularDamping);
     } else {
         dBodySetDamping(body, kSmallCubeLinearDamping, kSmallCubeAngularDamping);
@@ -242,11 +246,13 @@ void OdeWorld::HandleCollision(dxGeom* geom_a, dxGeom* geom_b) {
 
     dContact contacts[kMaxContactsPerPair];
     for (dContact& contact : contacts) {
-        contact.surface.mode = dContactBounce | dContactSoftCFM;
-        contact.surface.mu = 0.9;
-        contact.surface.bounce = 0.08;
-        contact.surface.bounce_vel = 0.1;
-        contact.surface.soft_cfm = 1e-5;
+        // 较高摩擦让地面接触点更容易产生反向切向力矩。
+        // 这样即使 input force 仍作用在质心，也更容易从平移转成滚动/翻倒。
+        contact.surface.mode = dContactBounce | dContactSoftCFM | dContactApprox1;
+        contact.surface.mu = 4.0;
+        contact.surface.bounce = 0.03;
+        contact.surface.bounce_vel = 0.05;
+        contact.surface.soft_cfm = 5e-6;
     }
 
     const int count = dCollide(geom_a, geom_b, kMaxContactsPerPair, &contacts[0].geom,
@@ -255,6 +261,23 @@ void OdeWorld::HandleCollision(dxGeom* geom_a, dxGeom* geom_b) {
         dJointID joint = dJointCreateContact(world_, contact_group_, &contacts[i]);
         dJointAttach(joint, body_a, body_b);
     }
+}
+
+void OdeWorld::ClampPlayerVelocity() {
+    if (entities_.empty()) {
+        return;
+    }
+
+    DynamicEntity& player = entities_.front();
+    const dReal* velocity = dBodyGetLinearVel(player.body);
+    const double horizontal_speed =
+        std::sqrt(velocity[0] * velocity[0] + velocity[2] * velocity[2]);
+    if (horizontal_speed <= kMaxPlayerHorizontalSpeed || horizontal_speed <= 0.0001) {
+        return;
+    }
+
+    const double scale = kMaxPlayerHorizontalSpeed / horizontal_speed;
+    dBodySetLinearVel(player.body, velocity[0] * scale, velocity[1], velocity[2] * scale);
 }
 
 }  // namespace xdpg::physics

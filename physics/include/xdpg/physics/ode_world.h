@@ -54,6 +54,7 @@ private:
     DynamicEntity CreateCube(std::uint32_t entity_id, EntityKind kind, double size, double mass,
                              const Vec3& position);
     void HandleCollision(dxGeom* geom_a, dxGeom* geom_b);
+    void ClampPlayerVelocity();
 
     OdeWorldConfig config_;
     dxWorld* world_ = nullptr;
