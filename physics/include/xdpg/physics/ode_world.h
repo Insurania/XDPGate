@@ -15,7 +15,7 @@ struct dxWorld;
 namespace xdpg::physics {
 
 struct OdeWorldConfig {
-    std::uint32_t small_cube_count = 48;
+    std::uint32_t small_cube_count = 180;
     double fixed_dt = 1.0 / 60.0;
 };
 
@@ -44,6 +44,8 @@ private:
         dxBody* body = nullptr;
         dxGeom* geom = nullptr;
         double half_extent = 0.5;
+        bool is_interacting = false;
+        std::uint32_t stopped_ticks = 0;
     };
 
     static void NearCallback(void* data, dxGeom* geom_a, dxGeom* geom_b);
@@ -54,7 +56,13 @@ private:
     DynamicEntity CreateCube(std::uint32_t entity_id, EntityKind kind, double size, double mass,
                              const Vec3& position);
     void HandleCollision(dxGeom* geom_a, dxGeom* geom_b);
+    void ApplyAttractionForces();
+    void UpdateInteractionStates();
     void ClampPlayerVelocity();
+    DynamicEntity* FindEntityByBody(dxBody* body);
+    const DynamicEntity* FindEntityByBody(dxBody* body) const;
+    bool IsPlayerBody(dxBody* body) const;
+    void MarkSmallCubeInteracted(dxBody* body);
 
     OdeWorldConfig config_;
     dxWorld* world_ = nullptr;

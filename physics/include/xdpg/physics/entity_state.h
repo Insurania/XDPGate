@@ -26,6 +26,7 @@ struct Quat {
 struct EntityState {
     std::uint32_t entity_id = 0;
     EntityKind kind = EntityKind::SmallCube;
+    bool is_interacting = false;
     double cube_size = 1.0;
     Vec3 position;
     Quat rotation;

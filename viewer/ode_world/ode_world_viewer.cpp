@@ -97,8 +97,8 @@ void DrawGround() {
         0.0f, 1.0f, 0.0f, 0.0f,
         0.0f, 0.0f, 1.0f, 0.0f,
     };
-    float sides[3]{18.0f, 18.0f, 0.04f};
-    dsSetColor(0.25f, 0.28f, 0.30f);
+    float sides[3]{160.0f, 160.0f, 0.04f};
+    dsSetColor(1.0f, 1.0f, 1.0f);
     dsDrawBox(pos, rot, sides);
 }
 
@@ -115,9 +115,11 @@ void DrawEntity(const xdpg::physics::EntityState& entity) {
     OdeToDrawRotation(entity.rotation, rot);
 
     if (entity.kind == xdpg::physics::EntityKind::PlayerCube) {
-        dsSetColor(0.1f, 0.45f, 1.0f);
+        dsSetColor(1.0f, 0.05f, 0.04f);
+    } else if (entity.is_interacting) {
+        dsSetColor(1.0f, 0.05f, 0.04f);
     } else {
-        dsSetColor(0.95f, 0.65f, 0.18f);
+        dsSetColor(0.55f, 0.55f, 0.55f);
     }
 
     dsDrawBox(pos, rot, sides);
@@ -160,7 +162,7 @@ void Command(int cmd) {
 int main(int argc, char** argv) {
     try {
         xdpg::physics::OdeWorldConfig config;
-        config.small_cube_count = 48;
+        config.small_cube_count = 180;
         config.fixed_dt = 1.0 / 60.0;
         g_world = std::make_unique<xdpg::physics::OdeWorld>(config);
 

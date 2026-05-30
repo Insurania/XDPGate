@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace xdpg::physics {
 namespace {
@@ -13,9 +14,9 @@ constexpr std::uint32_t kPlayerEntityId = 1;
 constexpr std::uint32_t kSmallCubeEntityIdBase = 1000;
 constexpr double kGravity = -9.81;
 constexpr double kPlayerCubeSize = 1.0;
-constexpr double kSmallCubeSize = 0.55;
+constexpr double kSmallCubeSize = 0.32;
 constexpr double kPlayerMass = 3.0;
-constexpr double kSmallCubeMass = 1.0;
+constexpr double kSmallCubeMass = 0.28;
 constexpr double kMoveForce = 95.0;
 constexpr double kBoostImpulse = 1.2;
 constexpr std::uint32_t kBoostButtonMask = 1u << 0u;
@@ -25,6 +26,11 @@ constexpr double kPlayerAngularDamping = 0.002;
 constexpr double kSmallCubeLinearDamping = 0.02;
 constexpr double kSmallCubeAngularDamping = 0.025;
 constexpr double kMaxPlayerHorizontalSpeed = 5.0;
+constexpr double kAttractionRadius = 2.2;
+constexpr double kAttractionForce = 9.0;
+constexpr double kStoppedLinearSpeed = 0.12;
+constexpr double kStoppedAngularSpeed = 0.18;
+constexpr std::uint32_t kStoppedTicksToDeactivate = 45;
 
 double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
@@ -51,7 +57,7 @@ Quat ReadQuat(const dReal* values) {
 }  // namespace
 
 OdeWorld::OdeWorld(const OdeWorldConfig& config) : config_(config) {
-    if (config_.small_cube_count > 96) {
+    if (config_.small_cube_count > 256) {
         throw std::invalid_argument("small_cube_count too large for phase 1 world");
     }
     if (config_.fixed_dt <= 0.0) {
@@ -111,11 +117,13 @@ void OdeWorld::ApplyInput(const InputCommand& input) {
 }
 
 void OdeWorld::Step() {
+    ApplyAttractionForces();
     dSpaceCollide(space_, this, &OdeWorld::NearCallback);
 
     // QuickStep 比完整 Step 更适合实时服务器：速度更快，稳定性足够支撑 toy DS。
     dWorldQuickStep(world_, config_.fixed_dt);
     ClampPlayerVelocity();
+    UpdateInteractionStates();
     dJointGroupEmpty(contact_group_);
     ++tick_;
 }
@@ -128,6 +136,7 @@ std::vector<EntityState> OdeWorld::CollectEntityStates() const {
         EntityState state;
         state.entity_id = entity.entity_id;
         state.kind = entity.kind;
+        state.is_interacting = entity.is_interacting;
         state.cube_size = entity.half_extent * 2.0;
         state.position = ReadVec3(dBodyGetPosition(entity.body));
         state.rotation = ReadQuat(dBodyGetQuaternion(entity.body));
@@ -175,32 +184,52 @@ void OdeWorld::CreatePlayerCube() {
 }
 
 void OdeWorld::CreateSmallCubes() {
-    std::uint32_t created = 0;
+    struct CandidatePosition {
+        double x = 0.0;
+        double z = 0.0;
+        double distance2 = 0.0;
+    };
 
-    // small cubes 围绕 player 出生，而不是只排在前方。中心 3x3 区域留空，
-    // 让 player cube 有一点起步空间；向任意方向移动后都会很快撞进 cube 群，
-    // 更接近“质心施力 + 地面摩擦 + 碰撞诱发滚动/翻倒”的观察场景。
-    constexpr int kGridRadius = 5;
-    constexpr double kSpacing = 0.9;
+    std::vector<CandidatePosition> candidates;
+
+    // 小 cube 以玩家为中心向外铺开，并按距离排序取前 N 个。
+    // 这样增多数量时仍然是“围绕玩家都有”，而不是因为遍历顺序只出现在某个方向。
+    constexpr int kGridRadius = 12;
+    constexpr double kSpacing = 0.48;
     constexpr double kCenterGap = 1.25;
-    for (int z = -kGridRadius; z <= kGridRadius && created < config_.small_cube_count; ++z) {
-        for (int x = -kGridRadius; x <= kGridRadius && created < config_.small_cube_count; ++x) {
+    for (int z = -kGridRadius; z <= kGridRadius; ++z) {
+        for (int x = -kGridRadius; x <= kGridRadius; ++x) {
             const double world_x = static_cast<double>(x) * kSpacing;
             const double world_z = static_cast<double>(z) * kSpacing;
             if (std::abs(world_x) < kCenterGap && std::abs(world_z) < kCenterGap) {
                 continue;
             }
-
-            const double height_jitter = static_cast<double>((created % 3u)) * 0.015;
-            const Vec3 position{
+            candidates.push_back(CandidatePosition{
                 world_x,
-                kSmallCubeSize * 0.5 + height_jitter,
                 world_z,
-            };
-            entities_.push_back(CreateCube(kSmallCubeEntityIdBase + created, EntityKind::SmallCube,
-                                           kSmallCubeSize, kSmallCubeMass, position));
-            ++created;
+                world_x * world_x + world_z * world_z,
+            });
         }
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const CandidatePosition& left, const CandidatePosition& right) {
+                  return left.distance2 < right.distance2;
+              });
+
+    const std::uint32_t count =
+        std::min<std::uint32_t>(config_.small_cube_count, static_cast<std::uint32_t>(candidates.size()));
+    for (std::uint32_t created = 0; created < count; ++created) {
+        const auto& candidate = candidates[created];
+
+        const double height_jitter = static_cast<double>((created % 3u)) * 0.01;
+        const Vec3 position{
+            candidate.x,
+            kSmallCubeSize * 0.5 + height_jitter,
+            candidate.z,
+        };
+        entities_.push_back(CreateCube(kSmallCubeEntityIdBase + created, EntityKind::SmallCube,
+                                       kSmallCubeSize, kSmallCubeMass, position));
     }
 }
 
@@ -261,6 +290,70 @@ void OdeWorld::HandleCollision(dxGeom* geom_a, dxGeom* geom_b) {
         dJointID joint = dJointCreateContact(world_, contact_group_, &contacts[i]);
         dJointAttach(joint, body_a, body_b);
     }
+
+    if (IsPlayerBody(body_a)) {
+        MarkSmallCubeInteracted(body_b);
+    } else if (IsPlayerBody(body_b)) {
+        MarkSmallCubeInteracted(body_a);
+    }
+}
+
+void OdeWorld::ApplyAttractionForces() {
+    if (entities_.empty()) {
+        return;
+    }
+
+    const dReal* player_position = dBodyGetPosition(entities_.front().body);
+    for (DynamicEntity& entity : entities_) {
+        if (entity.kind != EntityKind::SmallCube) {
+            continue;
+        }
+
+        const dReal* position = dBodyGetPosition(entity.body);
+        const double dx = static_cast<double>(player_position[0] - position[0]);
+        const double dy = static_cast<double>(player_position[1] - position[1]);
+        const double dz = static_cast<double>(player_position[2] - position[2]);
+        const double distance2 = dx * dx + dy * dy + dz * dz;
+        if (distance2 > kAttractionRadius * kAttractionRadius || distance2 <= 0.0001) {
+            continue;
+        }
+
+        const double distance = std::sqrt(distance2);
+        const double strength = kAttractionForce * (1.0 - distance / kAttractionRadius);
+        dBodyAddForce(entity.body, dx / distance * strength, dy / distance * strength,
+                      dz / distance * strength);
+
+        // 进入“块魂球”影响范围后只施加朝向玩家中心的力，不把刚体粘到玩家身上。
+        // 它仍然会继续参与 ODE 碰撞、摩擦、滚动和翻倒。
+        entity.is_interacting = true;
+        entity.stopped_ticks = 0;
+    }
+}
+
+void OdeWorld::UpdateInteractionStates() {
+    for (DynamicEntity& entity : entities_) {
+        if (entity.kind != EntityKind::SmallCube || !entity.is_interacting) {
+            continue;
+        }
+
+        const dReal* linear_velocity = dBodyGetLinearVel(entity.body);
+        const dReal* angular_velocity = dBodyGetAngularVel(entity.body);
+        const double linear_speed = std::sqrt(linear_velocity[0] * linear_velocity[0] +
+                                              linear_velocity[1] * linear_velocity[1] +
+                                              linear_velocity[2] * linear_velocity[2]);
+        const double angular_speed = std::sqrt(angular_velocity[0] * angular_velocity[0] +
+                                               angular_velocity[1] * angular_velocity[1] +
+                                               angular_velocity[2] * angular_velocity[2]);
+        if (linear_speed < kStoppedLinearSpeed && angular_speed < kStoppedAngularSpeed) {
+            ++entity.stopped_ticks;
+            if (entity.stopped_ticks >= kStoppedTicksToDeactivate) {
+                entity.is_interacting = false;
+                entity.stopped_ticks = 0;
+            }
+        } else {
+            entity.stopped_ticks = 0;
+        }
+    }
 }
 
 void OdeWorld::ClampPlayerVelocity() {
@@ -278,6 +371,47 @@ void OdeWorld::ClampPlayerVelocity() {
 
     const double scale = kMaxPlayerHorizontalSpeed / horizontal_speed;
     dBodySetLinearVel(player.body, velocity[0] * scale, velocity[1], velocity[2] * scale);
+}
+
+OdeWorld::DynamicEntity* OdeWorld::FindEntityByBody(dxBody* body) {
+    if (body == nullptr) {
+        return nullptr;
+    }
+
+    for (DynamicEntity& entity : entities_) {
+        if (entity.body == body) {
+            return &entity;
+        }
+    }
+    return nullptr;
+}
+
+const OdeWorld::DynamicEntity* OdeWorld::FindEntityByBody(dxBody* body) const {
+    if (body == nullptr) {
+        return nullptr;
+    }
+
+    for (const DynamicEntity& entity : entities_) {
+        if (entity.body == body) {
+            return &entity;
+        }
+    }
+    return nullptr;
+}
+
+bool OdeWorld::IsPlayerBody(dxBody* body) const {
+    const DynamicEntity* entity = FindEntityByBody(body);
+    return entity != nullptr && entity->kind == EntityKind::PlayerCube;
+}
+
+void OdeWorld::MarkSmallCubeInteracted(dxBody* body) {
+    DynamicEntity* entity = FindEntityByBody(body);
+    if (entity == nullptr || entity->kind != EntityKind::SmallCube) {
+        return;
+    }
+
+    entity->is_interacting = true;
+    entity->stopped_ticks = 0;
 }
 
 }  // namespace xdpg::physics
