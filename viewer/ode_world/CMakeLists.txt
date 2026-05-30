@@ -2,6 +2,12 @@ add_executable(xdpg_ode_world_viewer
     ode_world_viewer.cpp
 )
 
+if(WIN32)
+    target_sources(xdpg_ode_world_viewer PRIVATE
+        ${PROJECT_SOURCE_DIR}/third_party/ode/src/drawstuff/src/resources.rc
+    )
+endif()
+
 target_link_libraries(xdpg_ode_world_viewer
     PRIVATE
         xdpg_physics
@@ -13,4 +19,3 @@ if(MSVC)
 else()
     target_compile_options(xdpg_ode_world_viewer PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
