@@ -75,9 +75,11 @@ protocol/xdg_protocol_test.cpp
 创建：
 
 ```text
-physics/entity.h
-physics/ode_world.h
-physics/ode_world.cpp
+physics/include/xdpg/physics/entity_state.h
+physics/include/xdpg/physics/input_command.h
+physics/include/xdpg/physics/ode_world.h
+physics/src/ode_world.cpp
+physics/tests/ode_world_test.cpp
 ```
 
 World 内容：
@@ -269,4 +271,3 @@ UDP 可能被腾讯云安全组拦住，即使进程已经正确监听。先用�
 ### 网络带宽限制
 
 当前云服务器只有 5Mbps 带宽。远程测试要使用较低 snapshot rate 和较少 entity。
-

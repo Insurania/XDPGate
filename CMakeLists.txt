@@ -6,34 +6,28 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(xdpg_protocol
-    protocol/xdg_protocol.cpp
-)
-
-target_include_directories(xdpg_protocol
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_compile_features(xdpg_protocol PUBLIC cxx_std_17)
-
-if(MSVC)
-    target_compile_options(xdpg_protocol PRIVATE /W4 /utf-8)
-else()
-    target_compile_options(xdpg_protocol PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-add_executable(xdg_protocol_test
-    protocol/xdg_protocol_test.cpp
-)
-
-target_link_libraries(xdg_protocol_test PRIVATE xdpg_protocol)
-
-if(MSVC)
-    target_compile_options(xdg_protocol_test PRIVATE /W4 /utf-8)
-else()
-    target_compile_options(xdg_protocol_test PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ode/install")
 
 enable_testing()
-add_test(NAME xdg_protocol_test COMMAND xdg_protocol_test)
+
+add_subdirectory(protocol)
+
+find_package(ode CONFIG QUIET)
+
+if(NOT TARGET ODE::ODE)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ODE_PKG QUIET IMPORTED_TARGET ode)
+        if(TARGET PkgConfig::ODE_PKG)
+            add_library(ODE::ODE INTERFACE IMPORTED)
+            target_link_libraries(ODE::ODE INTERFACE PkgConfig::ODE_PKG)
+        endif()
+    endif()
+endif()
+
+if(TARGET ODE::ODE)
+    message(STATUS "ODE found: physics targets enabled")
+    add_subdirectory(physics)
+else()
+    message(STATUS "ODE not found: physics targets skipped")
+endif()

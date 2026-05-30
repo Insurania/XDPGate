@@ -103,14 +103,21 @@ XDPGate/
     benchmark-plan.md
 
   protocol/
+    CMakeLists.txt
     xdg_protocol.h
     xdg_protocol.cpp
     xdg_protocol_test.cpp
 
   physics/
-    entity.h
-    ode_world.h
-    ode_world.cpp
+    CMakeLists.txt
+    include/xdpg/physics/
+      entity_state.h
+      input_command.h
+      ode_world.h
+    src/
+      ode_world.cpp
+    tests/
+      ode_world_test.cpp
 
   server/
     main.cpp
@@ -255,4 +262,3 @@ DS 从第一阶段就应该每秒输出基础运行状态：
 - 按原因分类的 drop counters。
 - benchmark 结果文件。
 - snapshot latency 和 jitter 统计。
-

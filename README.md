@@ -64,6 +64,29 @@ ctest --test-dir build --output-on-failure
 
 ```text
 xdg_protocol_test
+xdpg_physics_test
 ```
 
-它会验证 INPUT、SNAPSHOT 和基础 header validation 的二进制编解码。
+其中：
+
+- `xdg_protocol_test` 验证 INPUT、SNAPSHOT 和基础 header validation 的二进制编解码。
+- `xdpg_physics_test` 验证 ODE world 可以推进 tick、处理 input，并导出 entity state。
+
+## ODE 本地依赖
+
+Windows 本地可以把 ODE 安装在项目目录下：
+
+```powershell
+New-Item -ItemType Directory -Force third_party\ode | Out-Null
+git clone --depth 1 --branch 0.16.6 https://bitbucket.org/odedevs/ode.git third_party\ode\src
+cmake -S third_party\ode\src -B third_party\ode\build -DCMAKE_INSTALL_PREFIX=third_party\ode\install -DBUILD_SHARED_LIBS=OFF -DODE_WITH_DEMOS=OFF -DODE_WITH_TESTS=OFF -DODE_WITH_LIBCCD=OFF
+cmake --build third_party\ode\build --config Release --target INSTALL
+cmake --build third_party\ode\build --config Debug --target INSTALL
+```
+
+Ubuntu 22.04 云服务器优先使用系统包：
+
+```bash
+sudo apt update
+sudo apt install -y libode-dev
+```

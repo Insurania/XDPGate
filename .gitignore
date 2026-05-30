@@ -25,10 +25,16 @@ venv/
 *.log
 bench/results/
 
+# Project-local third-party dependencies.
+# ODE can be installed locally under third_party/ode, but source/build/install
+# outputs are intentionally not tracked in this repository.
+third_party/ode/src/
+third_party/ode/build/
+third_party/ode/install/
+
 # Editor and OS files
 .vscode/
 .idea/
 *.swp
 Thumbs.db
 .DS_Store
-
