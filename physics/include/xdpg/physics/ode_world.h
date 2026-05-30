@@ -15,7 +15,7 @@ struct dxWorld;
 namespace xdpg::physics {
 
 struct OdeWorldConfig {
-    std::uint32_t small_cube_count = 12;
+    std::uint32_t small_cube_count = 48;
     double fixed_dt = 1.0 / 60.0;
 };
 
@@ -66,4 +66,3 @@ private:
 };
 
 }  // namespace xdpg::physics
-

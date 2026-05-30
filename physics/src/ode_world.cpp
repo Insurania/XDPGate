@@ -21,9 +21,9 @@ constexpr double kBoostImpulse = 0.8;
 constexpr std::uint32_t kBoostButtonMask = 1u << 0u;
 constexpr int kMaxContactsPerPair = 8;
 constexpr double kPlayerLinearDamping = 0.08;
-constexpr double kPlayerAngularDamping = 0.10;
+constexpr double kPlayerAngularDamping = 0.04;
 constexpr double kSmallCubeLinearDamping = 0.02;
-constexpr double kSmallCubeAngularDamping = 0.04;
+constexpr double kSmallCubeAngularDamping = 0.025;
 
 double Clamp(double value, double min_value, double max_value) {
     return std::max(min_value, std::min(max_value, value));
@@ -50,7 +50,7 @@ Quat ReadQuat(const dReal* values) {
 }  // namespace
 
 OdeWorld::OdeWorld(const OdeWorldConfig& config) : config_(config) {
-    if (config_.small_cube_count > 64) {
+    if (config_.small_cube_count > 96) {
         throw std::invalid_argument("small_cube_count too large for phase 1 world");
     }
     if (config_.fixed_dt <= 0.0) {
@@ -173,16 +173,32 @@ void OdeWorld::CreatePlayerCube() {
 }
 
 void OdeWorld::CreateSmallCubes() {
-    for (std::uint32_t i = 0; i < config_.small_cube_count; ++i) {
-        const double row = static_cast<double>(i / 4u);
-        const double col = static_cast<double>(i % 4u);
-        const Vec3 position{
-            -1.8 + col * 1.2,
-            0.8 + row * 0.05,
-            4.0 + row * 1.2,
-        };
-        entities_.push_back(CreateCube(kSmallCubeEntityIdBase + i, EntityKind::SmallCube,
-                                       kSmallCubeSize, kSmallCubeMass, position));
+    std::uint32_t created = 0;
+
+    // small cubes 围绕 player 出生，而不是只排在前方。中心 3x3 区域留空，
+    // 让 player cube 有一点起步空间；向任意方向移动后都会很快撞进 cube 群，
+    // 更接近“质心施力 + 地面摩擦 + 碰撞诱发滚动/翻倒”的观察场景。
+    constexpr int kGridRadius = 5;
+    constexpr double kSpacing = 0.9;
+    constexpr double kCenterGap = 1.25;
+    for (int z = -kGridRadius; z <= kGridRadius && created < config_.small_cube_count; ++z) {
+        for (int x = -kGridRadius; x <= kGridRadius && created < config_.small_cube_count; ++x) {
+            const double world_x = static_cast<double>(x) * kSpacing;
+            const double world_z = static_cast<double>(z) * kSpacing;
+            if (std::abs(world_x) < kCenterGap && std::abs(world_z) < kCenterGap) {
+                continue;
+            }
+
+            const double height_jitter = static_cast<double>((created % 3u)) * 0.015;
+            const Vec3 position{
+                world_x,
+                kSmallCubeSize * 0.5 + height_jitter,
+                world_z,
+            };
+            entities_.push_back(CreateCube(kSmallCubeEntityIdBase + created, EntityKind::SmallCube,
+                                           kSmallCubeSize, kSmallCubeMass, position));
+            ++created;
+        }
     }
 }
 

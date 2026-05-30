@@ -160,7 +160,7 @@ void Command(int cmd) {
 int main(int argc, char** argv) {
     try {
         xdpg::physics::OdeWorldConfig config;
-        config.small_cube_count = 12;
+        config.small_cube_count = 48;
         config.fixed_dt = 1.0 / 60.0;
         g_world = std::make_unique<xdpg::physics::OdeWorld>(config);
 
