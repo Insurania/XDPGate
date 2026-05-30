@@ -10,7 +10,8 @@ endif()
 
 target_link_libraries(xdpg_ode_world_viewer
     PRIVATE
-        xdpg_physics
+        xdpg_protocol
+        xdpg_net
         xdpg_drawstuff
 )
 

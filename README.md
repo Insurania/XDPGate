@@ -166,14 +166,27 @@ sudo apt update
 sudo apt install -y libode-dev
 ```
 
-## 本地 ODE 可视化
+## Network Snapshot Viewer
 
-当前提供一个本地调试 viewer，用于直接查看项目自己的 ODE world，不走 UDP：
+当前 viewer 已改为网络 snapshot viewer：它不在本地运行 ODE simulation，只负责：
+
+- 读取 W/A/S/D/Space 输入并通过 UDP 发送 INPUT packet；
+- 接收 server 返回的 snapshot chunk；
+- 等同一 `server_tick` 的分包收齐后渲染 cube 状态。
+
+先启动 DS server：
+
+```powershell
+cmake --build build --config Debug --target xdpg_server
+.\build\server\Debug\xdpg_server.exe --port 40000 --small-cubes 60
+```
+
+再另开一个 PowerShell 启动 viewer：
 
 ```powershell
 cmake -S . -B build
 cmake --build build --config Debug --target xdpg_ode_world_viewer
-.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe -notex
+.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 -notex
 ```
 
 控制方式：
@@ -184,3 +197,13 @@ Space: 切换 boost
 Q 或 Esc: 退出
 鼠标拖动: 调整相机
 ```
+
+也可以开两个 viewer 窗口连接同一个 server：
+
+```powershell
+.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 --client-id 1 -notex
+.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe --server 127.0.0.1 --port 40000 --client-id 2 -notex
+```
+
+注意：当前还不是多人游戏。多个 viewer 会看到同一个权威 ODE world，并且输入都会作用到
+同一个 player cube。后续再拆多 player entity 和输入归属。
