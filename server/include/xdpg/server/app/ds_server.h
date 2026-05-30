@@ -19,7 +19,7 @@ namespace xdpg::server {
 struct DsServerConfig {
     std::uint16_t port = 40000;
     std::uint32_t tick_rate = 60;
-    std::uint32_t snapshot_rate = 20;
+    std::uint32_t snapshot_rate = 60;
 
     // server 默认和本地 ODE viewer 保持一致：1 个 player + 180 个 small cube。
     // UDP snapshot 通过 chunk 分包发送，避免单包超过 1200 字节。

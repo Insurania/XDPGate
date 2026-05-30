@@ -1,5 +1,8 @@
 #include "protocol/xdg_protocol.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <stdexcept>
@@ -12,6 +15,7 @@ constexpr std::size_t kSnapshotPrefixSize = kSnapshotPayloadHeaderSize;
 constexpr std::size_t kEntitySnapshotSize = kEntitySnapshotWireSize;
 constexpr std::size_t kPingPayloadSize = 8;
 constexpr std::size_t kPongPayloadSize = 16;
+constexpr float kQuaternionSmallestThreeLimit = 0.7071067811865476f;
 
 // 这里不用 reinterpret_cast 直接读写整数，是为了避免 CPU 对齐、结构体 padding、
 // 主机字节序等因素影响网络协议。当前协议固定为 little-endian，小端 helper 是
@@ -42,6 +46,23 @@ void WriteF32Le(std::vector<std::uint8_t>& out, float value) {
     std::uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     WriteU32Le(out, bits);
+}
+
+float ClampFloat(float value, float min_value, float max_value) {
+    return std::max(min_value, std::min(value, max_value));
+}
+
+std::uint16_t QuantizeU16(float value, float min_value, float max_value) {
+    // 使用 round 而不是截断，让解码后的平均误差接近 0。范围外的位置会被钳制；
+    // 这比让 uint16 溢出安全，也方便后续在 stats 中统计 out-of-bounds。
+    const float clamped = ClampFloat(value, min_value, max_value);
+    const float normalized = (clamped - min_value) / (max_value - min_value);
+    return static_cast<std::uint16_t>(std::lround(normalized * 65535.0f));
+}
+
+float DequantizeU16(std::uint16_t value, float min_value, float max_value) {
+    const float normalized = static_cast<float>(value) / 65535.0f;
+    return min_value + normalized * (max_value - min_value);
 }
 
 std::uint8_t ReadU8(const std::uint8_t* data, std::size_t& offset) {
@@ -178,42 +199,117 @@ InputPayload ReadInputPayload(const std::uint8_t* data, std::size_t offset) {
     return payload;
 }
 
+std::array<float, 4> NormalizedQuaternion(const float rotation[4]) {
+    const float length_sq =
+        rotation[0] * rotation[0] + rotation[1] * rotation[1] +
+        rotation[2] * rotation[2] + rotation[3] * rotation[3];
+    if (length_sq <= 0.000001f) {
+        return {0.0f, 0.0f, 0.0f, 1.0f};
+    }
+
+    const float inv_length = 1.0f / std::sqrt(length_sq);
+    return {
+        rotation[0] * inv_length,
+        rotation[1] * inv_length,
+        rotation[2] * inv_length,
+        rotation[3] * inv_length,
+    };
+}
+
+void WriteCompressedPosition(std::vector<std::uint8_t>& out, const float position[3]) {
+    WriteU16Le(out, QuantizeU16(position[0], kSnapshotHorizontalMinMeters,
+                                kSnapshotHorizontalMaxMeters));
+    WriteU16Le(out, QuantizeU16(position[1], kSnapshotVerticalMinMeters,
+                                kSnapshotVerticalMaxMeters));
+    WriteU16Le(out, QuantizeU16(position[2], kSnapshotHorizontalMinMeters,
+                                kSnapshotHorizontalMaxMeters));
+}
+
+void ReadCompressedPosition(const std::uint8_t* data, std::size_t& offset, float position[3]) {
+    position[0] = DequantizeU16(ReadU16Le(data, offset), kSnapshotHorizontalMinMeters,
+                                kSnapshotHorizontalMaxMeters);
+    position[1] = DequantizeU16(ReadU16Le(data, offset), kSnapshotVerticalMinMeters,
+                                kSnapshotVerticalMaxMeters);
+    position[2] = DequantizeU16(ReadU16Le(data, offset), kSnapshotHorizontalMinMeters,
+                                kSnapshotHorizontalMaxMeters);
+}
+
+void WriteCompressedRotation(std::vector<std::uint8_t>& out, const float rotation[4]) {
+    auto q = NormalizedQuaternion(rotation);
+
+    std::uint8_t largest_index = 0;
+    float largest_abs = std::fabs(q[0]);
+    for (std::uint8_t i = 1; i < 4; ++i) {
+        const float value_abs = std::fabs(q[i]);
+        if (value_abs > largest_abs) {
+            largest_abs = value_abs;
+            largest_index = i;
+        }
+    }
+
+    // 四元数 q 和 -q 表示同一个旋转。编码前把被省略的最大项翻成非负，
+    // 解码端就不需要额外发送符号位，只要用单位长度约束恢复正值即可。
+    if (q[largest_index] < 0.0f) {
+        for (float& value : q) {
+            value = -value;
+        }
+    }
+
+    WriteU8(out, largest_index);
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        if (i == largest_index) {
+            continue;
+        }
+        WriteU16Le(out, QuantizeU16(q[i], -kQuaternionSmallestThreeLimit,
+                                    kQuaternionSmallestThreeLimit));
+    }
+}
+
+bool ReadCompressedRotation(const std::uint8_t* data, std::size_t& offset, float rotation[4]) {
+    const std::uint8_t largest_index = ReadU8(data, offset);
+    if (largest_index >= 4) {
+        return false;
+    }
+
+    float sum_sq = 0.0f;
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        if (i == largest_index) {
+            continue;
+        }
+        const float value =
+            DequantizeU16(ReadU16Le(data, offset), -kQuaternionSmallestThreeLimit,
+                          kQuaternionSmallestThreeLimit);
+        rotation[i] = value;
+        sum_sq += value * value;
+    }
+
+    rotation[largest_index] = std::sqrt(std::max(0.0f, 1.0f - sum_sq));
+    return true;
+}
+
 void WriteEntitySnapshot(std::vector<std::uint8_t>& out, const EntitySnapshot& entity) {
     WriteU32Le(out, entity.entity_id);
     WriteU16Le(out, static_cast<std::uint16_t>(entity.entity_type));
     WriteU16Le(out, entity.flags);
-    for (float value : entity.position) {
-        WriteF32Le(out, value);
-    }
-    for (float value : entity.rotation) {
-        WriteF32Le(out, value);
-    }
-    for (float value : entity.linear_velocity) {
-        WriteF32Le(out, value);
-    }
-    for (float value : entity.angular_velocity) {
-        WriteF32Le(out, value);
-    }
+    WriteCompressedPosition(out, entity.position);
+    WriteCompressedRotation(out, entity.rotation);
 }
 
-EntitySnapshot ReadEntitySnapshot(const std::uint8_t* data, std::size_t& offset) {
+bool ReadEntitySnapshot(const std::uint8_t* data, std::size_t& offset, EntitySnapshot* out) {
+    if (out == nullptr) {
+        return false;
+    }
+
     EntitySnapshot entity;
     entity.entity_id = ReadU32Le(data, offset);
     entity.entity_type = static_cast<EntityType>(ReadU16Le(data, offset));
     entity.flags = ReadU16Le(data, offset);
-    for (float& value : entity.position) {
-        value = ReadF32Le(data, offset);
+    ReadCompressedPosition(data, offset, entity.position);
+    if (!ReadCompressedRotation(data, offset, entity.rotation)) {
+        return false;
     }
-    for (float& value : entity.rotation) {
-        value = ReadF32Le(data, offset);
-    }
-    for (float& value : entity.linear_velocity) {
-        value = ReadF32Le(data, offset);
-    }
-    for (float& value : entity.angular_velocity) {
-        value = ReadF32Le(data, offset);
-    }
-    return entity;
+    *out = entity;
+    return true;
 }
 
 std::uint16_t CheckedPayloadSize(std::size_t size) {
@@ -363,7 +459,13 @@ DecodedSnapshot DecodeSnapshot(const std::uint8_t* data, std::size_t size) {
 
     decoded.payload.entities.reserve(entity_count);
     for (std::uint16_t i = 0; i < entity_count; ++i) {
-        decoded.payload.entities.push_back(ReadEntitySnapshot(data, offset));
+        EntitySnapshot entity;
+        if (!ReadEntitySnapshot(data, offset, &entity)) {
+            decoded.error = DecodeError::InvalidPacketPayload;
+            decoded.payload.entities.clear();
+            return decoded;
+        }
+        decoded.payload.entities.push_back(entity);
     }
     return decoded;
 }

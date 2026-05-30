@@ -33,8 +33,8 @@ xdpg::EntityType ToProtocolEntityType(physics::EntityKind kind) {
 }
 
 float ToFloat(double value) {
-    // ODE 本地构建目前使用 double precision，但 UDP snapshot v1 使用 float32。
-    // 在 server 边界显式收窄，方便以后统一检查精度和带宽取舍。
+    // ODE 本地构建目前使用 double precision；协议层会再做位置/旋转压缩。
+    // 在 server 边界先显式收窄成 float，方便把“物理精度”和“网络量化”分层观察。
     return static_cast<float>(value);
 }
 
@@ -237,12 +237,8 @@ void DsServer::SendSnapshot() {
             entity.rotation[1] = ToFloat(state.rotation.y);
             entity.rotation[2] = ToFloat(state.rotation.z);
             entity.rotation[3] = ToFloat(state.rotation.w);
-            entity.linear_velocity[0] = ToFloat(state.linear_velocity.x);
-            entity.linear_velocity[1] = ToFloat(state.linear_velocity.y);
-            entity.linear_velocity[2] = ToFloat(state.linear_velocity.z);
-            entity.angular_velocity[0] = ToFloat(state.angular_velocity.x);
-            entity.angular_velocity[1] = ToFloat(state.angular_velocity.y);
-            entity.angular_velocity[2] = ToFloat(state.angular_velocity.z);
+            // render snapshot 不再发送线速度/角速度。后续如果需要调试物理能量、
+            // 插值或预测，可以新增 DebugSnapshot 或按需字段，而不是让公网 viewer 背负调试带宽。
             snapshot.entities.push_back(entity);
         }
 

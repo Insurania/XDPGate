@@ -7,7 +7,8 @@ XDP gatekeeper、BPF maps 统计、`recvmmsg`、`SO_REUSEPORT` 和 benchmark 对
 
 ## 当前阶段
 
-当前仓库处于设计和骨架准备阶段，尚未开始实现代码。
+当前仓库已经具备最小 ODE DS、UDP input/snapshot、命令行 toy client 和 network
+snapshot viewer。后续会继续加入 network simulator、packet generator、XDP 和 benchmark。
 
 已完成文档：
 
@@ -102,8 +103,12 @@ cmake --build build --target xdpg_server
 .\build\server\Debug\xdpg_server.exe --port 40000 --small-cubes 15
 ```
 
-腾讯云轻量服务器只有 5Mbps 带宽。`180` 个 small cube 在 20Hz snapshot 下会产生
-更多 UDP 包，适合功能验证，不适合长时间公网高频测试。
+当前 render snapshot 默认 60Hz，并使用压缩 entity wire format：
+位置为 `uint16[3]` 量化，旋转为最小三项 `uint16[3]`，不发送线速度/角速度。
+单个 entity 从早期调试格式的 60 字节降到 21 字节。
+
+腾讯云轻量服务器只有 5Mbps 带宽。`180` 个 small cube 在 60Hz snapshot 下仍会产生
+较多 UDP 包，适合功能验证，不适合长时间公网高频测试。
 
 云服务器测试前，需要在腾讯云防火墙/安全组里放行对应 UDP 端口，例如
 `40000/udp`。如果本地客户端连不上，优先检查云防火墙，再检查 Ubuntu 防火墙。

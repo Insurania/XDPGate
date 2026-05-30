@@ -3,8 +3,8 @@
 XDPGate 使用小型二进制 UDP 协议。协议格式刻意保持简单，方便后续 XDP 程序只
 读取 UDP payload 开头几个字节，就能完成早期过滤。
 
-所有多字节整数字段均使用 little-endian（小端序）。浮点数字段使用 IEEE-754
-`float32`。
+所有多字节整数字段均使用 little-endian（小端序）。INPUT 里的浮点字段使用
+IEEE-754 `float32`；SNAPSHOT entity 的位置和旋转在 wire format 中使用量化格式。
 
 ## UDP Payload 布局
 
@@ -137,14 +137,41 @@ struct XdgEntitySnapshot {
     uint32_t entity_id;
     uint16_t entity_type;
     uint16_t flags;
-    float    position[3];
-    float    rotation[4];          // quaternion: x, y, z, w
-    float    linear_velocity[3];
-    float    angular_velocity[3];
+    uint16_t position_quantized[3];
+    uint8_t  rotation_largest_index;
+    uint16_t rotation_smallest_three[3];
 };
 ```
 
-Entity record 大小：60 字节。
+Entity record 大小：21 字节。
+
+位置量化范围：
+
+```text
+position.x: [-256, 255] meters
+position.y: [0, 32] meters
+position.z: [-256, 255] meters
+```
+
+注意：当前项目物理坐标是 Y-up，所以这里的 `position.y` 是高度轴。用户口径里
+“z 轴高度 [0,32]”在当前代码中映射到 Y 轴。
+
+位置解码公式：
+
+```text
+value = min + quantized / 65535 * (max - min)
+```
+
+旋转使用四元数最小三项压缩：
+
+- 先把四元数归一化。
+- 找到绝对值最大的分量，只发送它的 index。
+- 因为 `q` 和 `-q` 表示同一旋转，编码时把被省略的最大项翻成非负。
+- 其余三项按 `[-1/sqrt(2), +1/sqrt(2)]` 量化为 `uint16`。
+- 解码端用单位长度约束恢复被省略的最大项。
+
+render snapshot 不发送 `linear_velocity` 和 `angular_velocity`。如果后续需要物理调试、
+插值或预测，可以新增 DebugSnapshot 或按需字段。
 
 Entity type：
 
@@ -166,7 +193,7 @@ bit 0 = interacting
 Snapshot payload 大小：
 
 ```text
-24 + entity_count * 60
+24 + entity_count * 21
 ```
 
 ## PING Packet
@@ -233,19 +260,19 @@ struct XdgBenchmarkPayload {
 ```text
 最小 UDP payload: 16 字节
 最大 UDP payload: 1200 字节
-单个 snapshot chunk 最大 entity 数: 19
+单个 snapshot chunk 最大 entity 数: 55
 ```
 
 1200 字节可以比较稳妥地避开常见 MTU 下的 IP 分片。
 
-19 个 entity 时：
+55 个 entity 时：
 
 ```text
-header 16 + snapshot prefix 24 + 19 * 60 = 1180 字节
+header 16 + snapshot prefix 24 + 55 * 21 = 1195 字节
 ```
 
 完整 snapshot 可以由多个 chunk 组成。例如 `1 player + 180 small cubes = 181`
-个 entity，大约需要 10 个 UDP packet。
+个 entity，大约需要 4 个 UDP packet。
 
 ## 校验规则
 

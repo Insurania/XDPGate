@@ -12,13 +12,25 @@ constexpr char kMagic[4] = {'X', 'D', 'P', 'G'};
 constexpr std::uint8_t kVersion = 1;
 constexpr std::uint16_t kHeaderSize = 16;
 
-// snapshot v1 把完整状态控制在一个普通 MTU 以内，避免 IP 分片干扰后续网络实验。
+// snapshot 把单个 UDP packet 控制在普通 MTU 以内，避免 IP 分片干扰后续网络实验。
 // 大量 entity 通过多个 snapshot chunk 发送，而不是直接加大单个 UDP 包。
 constexpr std::size_t kMaxUdpPayloadSize = 1200;
 constexpr std::size_t kSnapshotPayloadHeaderSize = 24;
-constexpr std::size_t kEntitySnapshotWireSize = 60;
+
+// render snapshot 的 entity wire format：
+// entity_id u32 + entity_type u16 + flags u16 +
+// position_quantized u16[3] + rotation_meta u8 + rotation_smallest_three u16[3]。
+// 线速度和角速度不再进入渲染 snapshot；需要物理调试时后续单独加 DebugSnapshot。
+constexpr std::size_t kEntitySnapshotWireSize = 21;
 constexpr std::size_t kMaxSnapshotEntitiesPerPacket =
     (kMaxUdpPayloadSize - kHeaderSize - kSnapshotPayloadHeaderSize) / kEntitySnapshotWireSize;
+
+// 位置量化范围。项目物理坐标是 Y-up，所以这里的 vertical range 对应 position[1]。
+// 用户口径里的“z 轴高度 [0,32]”在当前代码中映射为 Y 轴高度。
+constexpr float kSnapshotHorizontalMinMeters = -256.0f;
+constexpr float kSnapshotHorizontalMaxMeters = 255.0f;
+constexpr float kSnapshotVerticalMinMeters = 0.0f;
+constexpr float kSnapshotVerticalMaxMeters = 32.0f;
 
 // EntitySnapshot::flags 的 bit 定义。先保留一个 interacting 状态，
 // 用于表达小 cube 正在被玩家碰撞/吸引影响，viewer 可以据此变色。

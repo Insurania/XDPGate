@@ -15,8 +15,8 @@ void Require(bool condition, const std::string& message) {
     }
 }
 
-void RequireNear(float actual, float expected, const std::string& message) {
-    if (std::fabs(actual - expected) > 0.0001f) {
+void RequireNear(float actual, float expected, float epsilon, const std::string& message) {
+    if (std::fabs(actual - expected) > epsilon) {
         throw std::runtime_error(message);
     }
 }
@@ -39,8 +39,8 @@ void TestInputRoundTrip() {
     Require(decoded.header.sequence == 7, "header sequence mismatch");
     Require(decoded.payload.client_id == input.client_id, "client_id mismatch");
     Require(decoded.payload.input_sequence == input.input_sequence, "input_sequence mismatch");
-    RequireNear(decoded.payload.move_x, input.move_x, "move_x mismatch");
-    RequireNear(decoded.payload.move_z, input.move_z, "move_z mismatch");
+    RequireNear(decoded.payload.move_x, input.move_x, 0.0001f, "move_x mismatch");
+    RequireNear(decoded.payload.move_z, input.move_z, 0.0001f, "move_z mismatch");
     Require(decoded.payload.buttons == input.buttons, "buttons mismatch");
     Require(decoded.payload.client_timestamp_usec == input.client_timestamp_usec,
             "client timestamp mismatch");
@@ -60,7 +60,8 @@ void TestSnapshotRoundTrip() {
     player.position[0] = 1.0f;
     player.position[1] = 2.0f;
     player.position[2] = 3.0f;
-    player.rotation[3] = 1.0f;
+    player.rotation[1] = 0.38268343f;
+    player.rotation[3] = 0.9238795f;
     player.linear_velocity[0] = 4.0f;
     player.angular_velocity[2] = 5.0f;
 
@@ -75,7 +76,7 @@ void TestSnapshotRoundTrip() {
     snapshot.entities.push_back(cube);
 
     const auto packet = xdpg::EncodeSnapshot(8, snapshot);
-    Require(packet.size() == 160, "SNAPSHOT packet size should be 160 bytes");
+    Require(packet.size() == 82, "SNAPSHOT packet size should be 82 bytes");
 
     const auto decoded = xdpg::DecodeSnapshot(packet.data(), packet.size());
     Require(decoded.error == xdpg::DecodeError::None, "SNAPSHOT decode should succeed");
@@ -93,11 +94,15 @@ void TestSnapshotRoundTrip() {
     Require(decoded.payload.entities[0].entity_id == 1, "player entity_id mismatch");
     Require(decoded.payload.entities[0].entity_type == xdpg::EntityType::PlayerCube,
             "player entity_type mismatch");
-    RequireNear(decoded.payload.entities[0].position[1], 2.0f, "player y mismatch");
-    RequireNear(decoded.payload.entities[0].linear_velocity[0], 4.0f,
-                "player linear velocity mismatch");
+    RequireNear(decoded.payload.entities[0].position[1], 2.0f, 0.001f, "player y mismatch");
+    RequireNear(decoded.payload.entities[0].rotation[1], player.rotation[1], 0.0001f,
+                "player rotation y mismatch");
+    RequireNear(decoded.payload.entities[0].rotation[3], player.rotation[3], 0.0001f,
+                "player rotation w mismatch");
+    RequireNear(decoded.payload.entities[0].linear_velocity[0], 0.0f, 0.0001f,
+                "render snapshot should not carry linear velocity");
     Require(decoded.payload.entities[1].entity_id == 1000, "small cube entity_id mismatch");
-    RequireNear(decoded.payload.entities[1].position[2], 9.5f, "small cube z mismatch");
+    RequireNear(decoded.payload.entities[1].position[2], 9.5f, 0.01f, "small cube z mismatch");
 }
 
 void TestHeaderValidation() {

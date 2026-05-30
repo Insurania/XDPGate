@@ -45,7 +45,7 @@ void PrintUsage(const char* exe) {
               << "Options:\n"
               << "  --port <udp_port>          default: 40000\n"
               << "  --tick-rate <hz>           default: 60\n"
-              << "  --snapshot-rate <hz>       default: 20\n"
+              << "  --snapshot-rate <hz>       default: 60\n"
               << "  --small-cubes <count>      default: 180\n"
               << "  --help                     show this help\n";
 }
