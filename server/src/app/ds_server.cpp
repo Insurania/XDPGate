@@ -11,12 +11,16 @@ namespace xdpg::server {
 namespace {
 
 std::uint64_t NowUsec() {
+    // 这里使用 steady_clock，而不是 system_clock。
+    // steady_clock 不会因为系统时间校准而倒退，适合做 ping/pong 的相对时间观测。
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
 xdpg::EntityType ToProtocolEntityType(physics::EntityKind kind) {
+    // physics 层不直接依赖 protocol 层，避免 ODE 逻辑被网络协议污染。
+    // server 作为边界层负责把内部 entity kind 映射成 wire format 枚举。
     switch (kind) {
         case physics::EntityKind::PlayerCube:
             return xdpg::EntityType::PlayerCube;
@@ -29,6 +33,8 @@ xdpg::EntityType ToProtocolEntityType(physics::EntityKind kind) {
 }
 
 float ToFloat(double value) {
+    // ODE 本地构建目前使用 double precision，但 UDP snapshot v1 使用 float32。
+    // 在 server 边界显式收窄，方便以后统一检查精度和带宽取舍。
     return static_cast<float>(value);
 }
 
@@ -56,6 +62,9 @@ int DsServer::Run(const std::atomic_bool& stop_requested) {
               << "  snapshot_rate=" << config_.snapshot_rate << '\n'
               << "  small_cube_count=" << config_.small_cube_count << '\n';
 
+    // accumulated fixed timestep loop：
+    // 网络收包和墙钟时间是不稳定的，但 ODE simulation 必须按固定 dt 推进。
+    // 因此每轮先累积真实经过时间，再按 fixed_dt 追赶一个或多个 simulation step。
     const auto fixed_dt =
         std::chrono::duration<double>(1.0 / static_cast<double>(config_.tick_rate));
     const auto snapshot_dt =
@@ -71,6 +80,8 @@ int DsServer::Run(const std::atomic_bool& stop_requested) {
 
         DrainSocket();
 
+        // 如果某一帧被系统调度拖慢，这里会连续 Step 多次追赶 tick。
+        // 第一阶段没有加最大追赶步数；后续 benchmark 时可以记录 tick drift 并加保护。
         while (accumulated >= fixed_dt) {
             StepSimulation();
             accumulated -= fixed_dt;
@@ -99,6 +110,7 @@ void DsServer::DrainSocket() {
         std::string error;
         const int received = socket_.Receive(buffer.data(), buffer.size(), &from, &error);
         if (received == 0) {
+            // non-blocking socket 当前已经没有可读包。返回主循环去推进 ODE。
             return;
         }
         if (received < 0) {
@@ -112,6 +124,8 @@ void DsServer::DrainSocket() {
 }
 
 void DsServer::HandlePacket(const std::uint8_t* data, std::size_t size, const Endpoint& from) {
+    // 先只解公共 header，可以快速过滤明显非法包，也避免把错误 packet 交给
+    // packet-specific decoder 产生误导性的错误原因。
     const auto header = xdpg::DecodeHeaderOnly(data, size);
     if (header.error != xdpg::DecodeError::None) {
         ++counters_.invalid_packets;
@@ -139,10 +153,14 @@ void DsServer::HandleInput(const std::uint8_t* data, std::size_t size, const End
         return;
     }
 
+    // 第一版采用“最近输入覆盖”策略：client 以 60Hz 发送 input，server 每个 tick
+    // 消费最新值。这不是最终竞技游戏网络模型，但足够验证 DS 权威物理主流程。
     latest_input_.input_sequence = decoded.payload.input_sequence;
     latest_input_.move_x = decoded.payload.move_x;
     latest_input_.move_z = decoded.payload.move_z;
     latest_input_.buttons = decoded.payload.buttons;
+    // 最近给 server 发送合法 input 的 endpoint 被认为是当前 snapshot 目标。
+    // 这让本地 toy client 不需要额外注册流程。
     latest_client_ = from;
     has_client_ = true;
     ++counters_.valid_inputs;
@@ -155,6 +173,8 @@ void DsServer::HandlePing(const std::uint8_t* data, std::size_t size, const Endp
         return;
     }
 
+    // PONG 原样带回 client timestamp，并附加 server steady timestamp。
+    // 后续工具可以用它估算 RTT 和 server 收包路径是否仍然活着。
     const auto pong = xdpg::EncodePong(outbound_sequence_++, xdpg::PongPayload{
         decoded.payload.timestamp_usec,
         NowUsec(),
@@ -169,6 +189,7 @@ void DsServer::HandlePing(const std::uint8_t* data, std::size_t size, const Endp
 }
 
 void DsServer::StepSimulation() {
+    // input 在这里真正进入权威模拟。注意：packet decode 阶段不直接修改 ODE body。
     world_.ApplyInput(latest_input_);
     world_.Step();
 }
@@ -183,6 +204,10 @@ void DsServer::SendSnapshot() {
     snapshot.last_processed_input_sequence = world_.last_processed_input_sequence();
 
     const auto states = world_.CollectEntityStates();
+
+    // snapshot v1 目标是单 UDP 包稳定传输，因此只发送前 kMaxSnapshotEntities 个。
+    // 当前 world 创建顺序保证 player 在第 0 个，后面是 small cubes。
+    // 大量 entity 后续要通过 chunked snapshot 或区域裁剪解决。
     const std::size_t count = std::min<std::size_t>(states.size(), xdpg::kMaxSnapshotEntities);
     snapshot.entities.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -190,6 +215,7 @@ void DsServer::SendSnapshot() {
         xdpg::EntitySnapshot entity;
         entity.entity_id = state.entity_id;
         entity.entity_type = ToProtocolEntityType(state.kind);
+        // interacting flag 让 viewer/client 能区分“普通灰色 cube”和“正在被玩家影响的 cube”。
         entity.flags = state.is_interacting ? xdpg::kEntityFlagInteracting : 0;
         entity.position[0] = ToFloat(state.position.x);
         entity.position[1] = ToFloat(state.position.y);
@@ -223,6 +249,7 @@ void DsServer::LogStatsIfDue() {
     }
     next_stats_log_ = now + std::chrono::seconds(1);
 
+    // 打印的是最近一秒增量，而不是进程累计值，更方便肉眼观察当前负载。
     const auto rx = counters_.received_packets - last_logged_counters_.received_packets;
     const auto inputs = counters_.valid_inputs - last_logged_counters_.valid_inputs;
     const auto invalid = counters_.invalid_packets - last_logged_counters_.invalid_packets;
@@ -243,4 +270,3 @@ void DsServer::LogStatsIfDue() {
 }
 
 }  // namespace xdpg::server
-

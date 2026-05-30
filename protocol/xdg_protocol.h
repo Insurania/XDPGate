@@ -11,8 +11,14 @@ namespace xdpg {
 constexpr char kMagic[4] = {'X', 'D', 'P', 'G'};
 constexpr std::uint8_t kVersion = 1;
 constexpr std::uint16_t kHeaderSize = 16;
+
+// snapshot v1 把完整状态控制在一个普通 MTU 以内，避免 IP 分片干扰后续网络实验。
+// 如果需要更多 entity，应通过 chunked snapshot 或区域裁剪扩展协议，而不是直接加大包。
 constexpr std::size_t kMaxUdpPayloadSize = 1200;
 constexpr std::size_t kMaxSnapshotEntities = 16;
+
+// EntitySnapshot::flags 的 bit 定义。先保留一个 interacting 状态，
+// 用于表达小 cube 正在被玩家碰撞/吸引影响，viewer 可以据此变色。
 constexpr std::uint16_t kEntityFlagInteracting = 1u << 0u;
 
 enum class PacketType : std::uint8_t {
@@ -44,6 +50,9 @@ enum class DecodeError {
 
 struct PacketHeader {
     PacketType packet_type = PacketType::Input;
+
+    // sequence 是发送方本地 packet 序号，用于观察丢包和乱序；
+    // 它和 input_sequence 不是同一个概念。
     std::uint32_t sequence = 0;
     std::uint16_t payload_size = 0;
     std::uint16_t flags = 0;
@@ -51,7 +60,12 @@ struct PacketHeader {
 
 struct InputPayload {
     std::uint64_t client_id = 0;
+
+    // 客户端输入命令序号。server snapshot 会回传最后处理到的 input_sequence，
+    // 后续做 prediction/reconciliation 时会依赖这个字段。
     std::uint32_t input_sequence = 0;
+
+    // 移动输入不是位置。server 会把它转换成作用在 player cube 上的 force/impulse。
     float move_x = 0.0f;
     float move_z = 0.0f;
     std::uint32_t buttons = 0;
@@ -61,6 +75,9 @@ struct InputPayload {
 struct EntitySnapshot {
     std::uint32_t entity_id = 0;
     EntityType entity_type = EntityType::SmallCube;
+
+    // bitset，当前只定义 kEntityFlagInteracting。不要把它当成颜色本身；
+    // 颜色是 viewer 策略，flags 表示服务端状态。
     std::uint16_t flags = 0;
     float position[3] = {0.0f, 0.0f, 0.0f};
     float rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -75,11 +92,14 @@ struct SnapshotPayload {
 };
 
 struct PingPayload {
+    // client/tool 发出的本地时间戳。server PONG 会原样带回。
     std::uint64_t timestamp_usec = 0;
 };
 
 struct PongPayload {
     std::uint64_t timestamp_usec = 0;
+
+    // server 收到 PING 并编码 PONG 时的 steady timestamp，用于粗略观测 server 活性。
     std::uint64_t server_timestamp_usec = 0;
 };
 

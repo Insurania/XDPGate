@@ -14,10 +14,13 @@ namespace {
 std::atomic_bool g_stop_requested{false};
 
 void HandleSignal(int) {
+    // 信号处理函数里只设置 atomic flag，不做复杂清理。
+    // 真正的 socket/ODE 析构交给主线程从 Run 返回后自然完成。
     g_stop_requested.store(true);
 }
 
 bool ParseUint16(const char* text, std::uint16_t* out) {
+    // CLI 参数解析保持最小依赖，避免第一阶段引入额外第三方库。
     char* end = nullptr;
     const unsigned long value = std::strtoul(text, &end, 10);
     if (end == text || *end != '\0' || value > 65535ul) {
@@ -52,6 +55,8 @@ void PrintUsage(const char* exe) {
 int main(int argc, char** argv) {
     xdpg::server::DsServerConfig config;
 
+    // 手写简单参数解析，便于 Windows/Ubuntu 都能直接运行。
+    // 后续参数变多时，可以再换成更系统的 CLI parser。
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--help") {
@@ -89,6 +94,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    // 这个限制来自协议 v1 的单包 snapshot 设计，不是 ODE world 本身的限制。
+    // 本地 viewer 可以跑 180 个 cube；网络 server 第一版先避免 UDP 分片。
     if (config.small_cube_count + 1 > xdpg::kMaxSnapshotEntities) {
         std::cerr << "当前 snapshot v1 最多发送 " << xdpg::kMaxSnapshotEntities
                   << " 个 entity。请将 --small-cubes 设置为 "

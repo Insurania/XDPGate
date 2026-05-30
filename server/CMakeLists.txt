@@ -4,6 +4,8 @@ add_executable(xdpg_server
     src/net/udp_socket.cpp
 )
 
+# server 只暴露自己的 include 目录。protocol/physics 通过 target_link_libraries
+# 传递 include path，避免手工拼一堆全局 include。
 target_include_directories(xdpg_server
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -26,4 +28,3 @@ if(MSVC)
 else()
     target_compile_options(xdpg_server PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-

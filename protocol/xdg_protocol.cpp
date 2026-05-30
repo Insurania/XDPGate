@@ -360,6 +360,8 @@ std::vector<std::uint8_t> EncodePing(std::uint32_t sequence, const PingPayload& 
 
 DecodedPing DecodePing(const std::uint8_t* data, std::size_t size) {
     DecodedPing decoded;
+
+    // PING/PONG 走同一套 header 校验，保证 XDP/用户态看到的 magic/version/size 规则一致。
     auto header = DecodeHeaderInternal(data, size);
     decoded.header = header.header;
     decoded.error = header.error;
@@ -388,6 +390,8 @@ std::vector<std::uint8_t> EncodePong(std::uint32_t sequence, const PongPayload& 
 
 DecodedPong DecodePong(const std::uint8_t* data, std::size_t size) {
     DecodedPong decoded;
+
+    // PONG 当前主要给 tools/client 使用；server 暂时不会主动消费 PONG。
     auto header = DecodeHeaderInternal(data, size);
     decoded.header = header.header;
     decoded.error = header.error;

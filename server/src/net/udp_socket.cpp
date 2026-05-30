@@ -19,6 +19,8 @@ namespace {
 class WinsockRuntime {
 public:
     WinsockRuntime() {
+        // Windows socket API 使用前必须初始化 Winsock。把它做成静态单例，
+        // 可以避免每个 UdpSocket 重复 WSAStartup/WSACleanup。
         WSADATA data{};
         ok_ = WSAStartup(MAKEWORD(2, 2), &data) == 0;
     }
@@ -36,6 +38,8 @@ private:
 };
 
 WinsockRuntime& GetWinsockRuntime() {
+    // 函数内 static 在 C++11 之后是线程安全初始化。
+    // 当前 server 单线程使用，但这样写后续扩展也不会重复初始化 Winsock。
     static WinsockRuntime runtime;
     return runtime;
 }
@@ -45,6 +49,7 @@ std::string LastSocketError() {
 }
 
 bool IsWouldBlock() {
+    // non-blocking recvfrom 没有数据时不是致命错误，上层会把它当作“本轮收包结束”。
     const int error = WSAGetLastError();
     return error == WSAEWOULDBLOCK;
 }
@@ -54,6 +59,7 @@ std::string LastSocketError() {
 }
 
 bool IsWouldBlock() {
+    // Linux/BSD 上不同实现可能返回 EWOULDBLOCK 或 EAGAIN，两个都视为暂时无数据。
     return errno == EWOULDBLOCK || errno == EAGAIN;
 }
 #endif
@@ -69,6 +75,7 @@ std::string Endpoint::ToString() const {
 
     char host[NI_MAXHOST] = {};
     char service[NI_MAXSERV] = {};
+    // 使用 getnameinfo 而不是手写 inet_ntop，是为了保留未来 IPv6 endpoint 的可能性。
     const int result = getnameinfo(addr(), length_, host, sizeof(host), service, sizeof(service),
                                    NI_NUMERICHOST | NI_NUMERICSERV);
     if (result != 0) {
@@ -96,6 +103,7 @@ bool UdpSocket::Open(std::uint16_t port, std::string* error) {
     }
 #endif
 
+    // Open 允许重复调用。先关闭旧 socket，避免端口和 fd/handle 泄漏。
     Close();
     socket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (socket_ == kInvalidSocket) {
@@ -105,10 +113,13 @@ bool UdpSocket::Open(std::uint16_t port, std::string* error) {
         return false;
     }
 
+    // SO_REUSEADDR 主要方便开发时快速重启 server。
+    // 注意它不是 SO_REUSEPORT；真正多 worker 分流会在后续阶段单独实现。
     int reuse = 1;
     setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
                sizeof(reuse));
 
+    // 第一阶段只绑定 IPv4 INADDR_ANY。XDP 第一版也会先按 IPv4 UDP 做早期过滤。
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -146,6 +157,7 @@ int UdpSocket::Receive(std::uint8_t* buffer, std::size_t capacity, Endpoint* fro
         return -1;
     }
 
+    // 每次 receive 都创建一个新的 Endpoint，避免上一次来源地址残留。
     Endpoint endpoint;
     const int received = recvfrom(socket_, reinterpret_cast<char*>(buffer),
                                   static_cast<int>(capacity), 0, endpoint.mutable_addr(),
@@ -176,6 +188,8 @@ bool UdpSocket::Send(const std::uint8_t* data, std::size_t size, const Endpoint&
         return false;
     }
 
+    // UDP datagram 要么作为一个 packet 发送，要么失败；如果 sendto 返回短写，
+    // 这里也当成错误处理，避免上层误以为 snapshot 已完整发出。
     const int sent = sendto(socket_, reinterpret_cast<const char*>(data), static_cast<int>(size),
                             0, to.addr(), to.length());
     if (sent < 0 || static_cast<std::size_t>(sent) != size) {
@@ -189,6 +203,7 @@ bool UdpSocket::Send(const std::uint8_t* data, std::size_t size, const Endpoint&
 
 bool UdpSocket::SetNonBlocking(std::string* error) {
 #if defined(_WIN32)
+    // Windows 用 ioctlsocket 设置 non-blocking。
     u_long mode = 1;
     if (ioctlsocket(socket_, FIONBIO, &mode) != 0) {
         if (error != nullptr) {
@@ -197,6 +212,7 @@ bool UdpSocket::SetNonBlocking(std::string* error) {
         return false;
     }
 #else
+    // Linux/Unix 用 fcntl 追加 O_NONBLOCK，保留原有 fd flags。
     const int flags = fcntl(socket_, F_GETFL, 0);
     if (flags < 0 || fcntl(socket_, F_SETFL, flags | O_NONBLOCK) != 0) {
         if (error != nullptr) {
@@ -209,4 +225,3 @@ bool UdpSocket::SetNonBlocking(std::string* error) {
 }
 
 }  // namespace xdpg::server
-
