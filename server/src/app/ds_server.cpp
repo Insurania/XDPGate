@@ -43,6 +43,13 @@ std::uint32_t DenseIndexFromEntityId(std::uint32_t entity_id) {
     return xdpg::SnapshotDenseIndexFromEntityId(entity_id);
 }
 
+double DistanceSquared(const xdpg::EntitySnapshot& a, const xdpg::EntitySnapshot& b) {
+    const double dx = static_cast<double>(a.position[0] - b.position[0]);
+    const double dy = static_cast<double>(a.position[1] - b.position[1]);
+    const double dz = static_cast<double>(a.position[2] - b.position[2]);
+    return dx * dx + dy * dy + dz * dz;
+}
+
 physics::Vec3 SpawnPositionForPlayer(std::uint32_t player_entity_id) {
     // 多客户端第一版先用固定出生环，避免新 player 和已有刚体完全重叠。
     // entity_id 从 1 开始，映射到一圈半径约 2.5m 的点位。
@@ -84,6 +91,30 @@ bool SnapshotEntityChanged(const xdpg::EntitySnapshot& previous,
         }
     }
     return false;
+}
+
+bool SameEntitySet(const std::vector<xdpg::EntitySnapshot>& previous,
+                   const std::vector<xdpg::EntitySnapshot>& current) {
+    if (previous.size() != current.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < current.size(); ++i) {
+        if (previous[i].entity_id != current[i].entity_id ||
+            previous[i].entity_type != current[i].entity_type) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const xdpg::EntitySnapshot* FindSnapshotEntity(
+    const std::vector<xdpg::EntitySnapshot>& entities,
+    std::uint32_t entity_id) {
+    const auto it = std::find_if(entities.begin(), entities.end(),
+                                 [entity_id](const xdpg::EntitySnapshot& entity) {
+                                     return entity.entity_id == entity_id;
+                                 });
+    return it == entities.end() ? nullptr : &*it;
 }
 
 bool CanUseOffsetEncoding(const std::vector<xdpg::EntitySnapshot>& entities,
@@ -143,7 +174,9 @@ int DsServer::Run(const std::atomic_bool& stop_requested) {
               << "  udp_port=" << config_.port << '\n'
               << "  tick_rate=" << config_.tick_rate << '\n'
               << "  snapshot_rate=" << config_.snapshot_rate << '\n'
-              << "  small_cube_count=" << config_.small_cube_count << '\n';
+              << "  small_cube_count=" << config_.small_cube_count << '\n'
+              << "  interest_radius_meters=" << config_.interest_radius_meters << '\n'
+              << "  snapshot_entity_budget=" << config_.snapshot_entity_budget << '\n';
 
     // accumulated fixed timestep loop：
     // 网络收包和墙钟时间是不稳定的，但 ODE simulation 必须按固定 dt 推进。
@@ -292,40 +325,39 @@ void DsServer::SendSnapshot() {
     }
 
     const auto current_entities = BuildCurrentSnapshotEntities();
-    const auto changed_entities = CollectChangedEntities(current_entities);
-    const auto encoding_mode = ChooseSnapshotEncoding(current_entities, changed_entities);
-    const auto& entities_to_send =
-        encoding_mode == xdpg::SnapshotEncodingMode::Full ? current_entities : changed_entities;
-    const std::size_t total_entities = current_entities.size();
-    const std::size_t max_per_packet = xdpg::MaxSnapshotEntitiesPerPacket(encoding_mode);
-    const std::size_t chunk_count = entities_to_send.empty()
-                                        ? 1
-                                        : (entities_to_send.size() + max_per_packet - 1) /
-                                              max_per_packet;
+    for (auto& client : clients_) {
+        const auto interest_entities = BuildInterestSnapshotForClient(current_entities, client);
+        const auto changed_entities = CollectChangedEntities(client, interest_entities);
+        const auto encoding_mode = ChooseSnapshotEncoding(client, interest_entities,
+                                                          changed_entities);
+        const auto& entities_to_send =
+            encoding_mode == xdpg::SnapshotEncodingMode::Full ? interest_entities
+                                                              : changed_entities;
+        const std::size_t total_entities = interest_entities.size();
+        const std::size_t max_per_packet = xdpg::MaxSnapshotEntitiesPerPacket(encoding_mode);
+        const std::size_t chunk_count = entities_to_send.empty()
+                                            ? 1
+                                            : (entities_to_send.size() + max_per_packet - 1) /
+                                                  max_per_packet;
 
-    // snapshot chunking：同一个 server_tick 的完整状态会拆成多个 UDP 包。
-    // 每个包仍然小于 1200 字节，viewer/client 通过 chunk_index/chunk_count 重组。
-    for (std::size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
-        const std::size_t begin = chunk_index * max_per_packet;
-        const std::size_t end = begin + max_per_packet < entities_to_send.size()
-                                    ? begin + max_per_packet
-                                    : entities_to_send.size();
+        // snapshot chunking：同一个 server_tick 的可见状态会拆成多个 UDP 包。
+        // interest set 是按客户端定制的，因此 full/delta 基线也必须按客户端保存。
+        for (std::size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+            const std::size_t begin = chunk_index * max_per_packet;
+            const std::size_t end = begin + max_per_packet < entities_to_send.size()
+                                        ? begin + max_per_packet
+                                        : entities_to_send.size();
 
-        xdpg::SnapshotPayload snapshot;
-        snapshot.server_tick = world_.tick();
-        snapshot.encoding_mode = encoding_mode;
-        snapshot.chunk_index = static_cast<std::uint16_t>(chunk_index);
-        snapshot.chunk_count = static_cast<std::uint16_t>(chunk_count);
-        snapshot.total_entity_count = static_cast<std::uint16_t>(total_entities);
-
-        for (const auto& client : clients_) {
-            // 同一个 server tick 的 entity 内容基本一致，但 last_processed_input_sequence
-            // 和 local-player flag 是按客户端定制的，方便每个 viewer 跟随自己的 player。
+            xdpg::SnapshotPayload snapshot;
+            snapshot.server_tick = world_.tick();
             snapshot.last_processed_input_sequence = client.latest_input.input_sequence;
-            snapshot.entities = BuildSnapshotForClient(
-                std::vector<xdpg::EntitySnapshot>(entities_to_send.begin() + begin,
-                                                  entities_to_send.begin() + end),
-                client);
+            snapshot.encoding_mode = encoding_mode;
+            snapshot.chunk_index = static_cast<std::uint16_t>(chunk_index);
+            snapshot.chunk_count = static_cast<std::uint16_t>(chunk_count);
+            snapshot.total_entity_count = static_cast<std::uint16_t>(total_entities);
+            snapshot.entities.assign(entities_to_send.begin() + begin,
+                                     entities_to_send.begin() + end);
+
             const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
             std::string error;
             if (socket_.Send(packet.data(), packet.size(), client.endpoint, &error)) {
@@ -335,12 +367,12 @@ void DsServer::SendSnapshot() {
                           << error << '\n';
             }
         }
-    }
 
-    previous_snapshot_entities_ = current_entities;
-    has_previous_snapshot_ = true;
-    snapshots_since_full_ =
-        encoding_mode == xdpg::SnapshotEncodingMode::Full ? 0 : snapshots_since_full_ + 1;
+        client.previous_snapshot_entities = interest_entities;
+        client.has_previous_snapshot = true;
+        client.snapshots_since_full =
+            encoding_mode == xdpg::SnapshotEncodingMode::Full ? 0 : client.snapshots_since_full + 1;
+    }
 }
 
 void DsServer::LogStatsIfDue() {
@@ -417,9 +449,12 @@ DsServer::ClientRecord* DsServer::RegisterInputClient(
     record.latest_input.player_entity_id = player_entity_id;
     clients_.push_back(record);
 
-    // 新 session 加入后，实体数量发生变化；强制下一帧发 full snapshot，
-    // 让所有 viewer 立即拿到新的 player 列表和自己的 local-player 标记。
-    has_previous_snapshot_ = false;
+    // 新 session 加入后，玩家列表发生变化；强制所有客户端下一帧发 full snapshot，
+    // 让 viewer 立即拿到新的 player 列表和自己的 local-player 标记。
+    for (auto& client : clients_) {
+        client.has_previous_snapshot = false;
+        client.snapshots_since_full = 0;
+    }
 
     std::cout << "[session] client=" << key
               << " client_id=" << client_id
@@ -468,28 +503,117 @@ std::vector<xdpg::EntitySnapshot> DsServer::BuildCurrentSnapshotEntities() const
     return entities;
 }
 
-std::vector<xdpg::EntitySnapshot> DsServer::BuildSnapshotForClient(
+std::vector<xdpg::EntitySnapshot> DsServer::BuildInterestSnapshotForClient(
     const std::vector<xdpg::EntitySnapshot>& entities,
     const ClientRecord& client) const {
-    std::vector<xdpg::EntitySnapshot> customized = entities;
-    for (auto& entity : customized) {
-        if (entity.entity_type == xdpg::EntityType::PlayerCube &&
-            entity.entity_id == client.player_entity_id) {
-            entity.flags |= xdpg::kEntityFlagLocalPlayer;
+    struct Candidate {
+        xdpg::EntitySnapshot entity;
+        double priority = 0.0;
+    };
+
+    const xdpg::EntitySnapshot* local_player =
+        FindSnapshotEntity(entities, client.player_entity_id);
+    const bool unlimited_budget = config_.snapshot_entity_budget == 0;
+    const std::uint32_t budget = unlimited_budget ? UINT32_MAX : config_.snapshot_entity_budget;
+    const double radius = config_.interest_radius_meters;
+    const double radius2 = radius * radius;
+
+    std::vector<xdpg::EntitySnapshot> selected_players;
+    std::vector<Candidate> small_candidates;
+
+    for (auto entity : entities) {
+        if (entity.entity_type == xdpg::EntityType::PlayerCube) {
+            if (entity.entity_id == client.player_entity_id) {
+                entity.flags |= xdpg::kEntityFlagLocalPlayer;
+            }
+            // 玩家实体数量很小，而且对多人验证很重要，因此始终进入 interest set。
+            selected_players.push_back(entity);
+            continue;
         }
+
+        if (entity.entity_type != xdpg::EntityType::SmallCube) {
+            continue;
+        }
+
+        double distance2 = 0.0;
+        if (local_player != nullptr) {
+            distance2 = DistanceSquared(entity, *local_player);
+            if (radius > 0.0 && distance2 > radius2) {
+                continue;
+            }
+        }
+
+        double priority = 0.0;
+        if (radius > 0.0 && local_player != nullptr) {
+            const double distance = std::sqrt(distance2);
+            const double distance_factor = 1.0 - distance / radius;
+            priority += (distance_factor > 0.0 ? distance_factor : 0.0) * 100.0;
+        }
+        if ((entity.flags & xdpg::kEntityFlagInteracting) != 0u) {
+            priority += 80.0;
+        }
+        if (const xdpg::EntitySnapshot* previous =
+                FindSnapshotEntity(client.previous_snapshot_entities, entity.entity_id)) {
+            if (SnapshotEntityChanged(*previous, entity)) {
+                priority += 40.0;
+            }
+        } else {
+            // 新进入兴趣范围的实体需要尽快发给客户端，避免 viewer 长时间看不到它。
+            priority += 30.0;
+        }
+
+        small_candidates.push_back(Candidate{entity, priority});
     }
-    return customized;
+
+    std::sort(selected_players.begin(), selected_players.end(), [](const auto& lhs, const auto& rhs) {
+        return DenseIndexFromEntityId(lhs.entity_id) < DenseIndexFromEntityId(rhs.entity_id);
+    });
+    std::sort(small_candidates.begin(), small_candidates.end(),
+              [](const Candidate& lhs, const Candidate& rhs) {
+                  if (std::fabs(lhs.priority - rhs.priority) > 0.0001) {
+                      return lhs.priority > rhs.priority;
+                  }
+                  return DenseIndexFromEntityId(lhs.entity.entity_id) <
+                         DenseIndexFromEntityId(rhs.entity.entity_id);
+              });
+
+    std::vector<xdpg::EntitySnapshot> selected;
+    const std::size_t reserve_count =
+        unlimited_budget || entities.size() < static_cast<std::size_t>(budget)
+            ? entities.size()
+            : static_cast<std::size_t>(budget);
+    selected.reserve(reserve_count);
+    for (const auto& player : selected_players) {
+        selected.push_back(player);
+    }
+
+    const std::size_t remaining_budget =
+        unlimited_budget || selected.size() >= budget
+            ? (unlimited_budget ? small_candidates.size() : 0)
+            : static_cast<std::size_t>(budget) - selected.size();
+    for (std::size_t i = 0; i < small_candidates.size() && i < remaining_budget; ++i) {
+        selected.push_back(small_candidates[i].entity);
+    }
+
+    // 协议的 delta-offset 编码要求实体按 dense index 单调递增；优先级只影响“选谁”，
+    // 真正写包前仍要回到稳定顺序。
+    std::sort(selected.begin(), selected.end(), [](const auto& lhs, const auto& rhs) {
+        return DenseIndexFromEntityId(lhs.entity_id) < DenseIndexFromEntityId(rhs.entity_id);
+    });
+    return selected;
 }
 
 std::vector<xdpg::EntitySnapshot> DsServer::CollectChangedEntities(
+    const ClientRecord& client,
     const std::vector<xdpg::EntitySnapshot>& current) const {
-    if (!has_previous_snapshot_ || previous_snapshot_entities_.size() != current.size()) {
+    if (!client.has_previous_snapshot ||
+        !SameEntitySet(client.previous_snapshot_entities, current)) {
         return current;
     }
 
     std::vector<xdpg::EntitySnapshot> changed;
     for (std::size_t i = 0; i < current.size(); ++i) {
-        if (SnapshotEntityChanged(previous_snapshot_entities_[i], current[i])) {
+        if (SnapshotEntityChanged(client.previous_snapshot_entities[i], current[i])) {
             changed.push_back(current[i]);
         }
     }
@@ -497,13 +621,14 @@ std::vector<xdpg::EntitySnapshot> DsServer::CollectChangedEntities(
 }
 
 xdpg::SnapshotEncodingMode DsServer::ChooseSnapshotEncoding(
+    const ClientRecord& client,
     const std::vector<xdpg::EntitySnapshot>& current,
     const std::vector<xdpg::EntitySnapshot>& changed) const {
     // 每秒强制发送一次 full keyframe，用来让新 viewer 建立基线，也让 UDP 丢包造成的
     // delta 状态漂移可以自动恢复。第一版不做可靠重传，先用周期性 full 保守兜底。
-    if (!has_previous_snapshot_ ||
-        snapshots_since_full_ >= config_.snapshot_rate ||
-        previous_snapshot_entities_.size() != current.size()) {
+    if (!client.has_previous_snapshot ||
+        client.snapshots_since_full >= config_.snapshot_rate ||
+        !SameEntitySet(client.previous_snapshot_entities, current)) {
         return xdpg::SnapshotEncodingMode::Full;
     }
 

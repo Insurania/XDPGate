@@ -40,6 +40,16 @@ bool ParseUint32(const char* text, std::uint32_t* out) {
     return true;
 }
 
+bool ParseDouble(const char* text, double* out) {
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || value < 0.0) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
 void PrintUsage(const char* exe) {
     std::cout << "Usage: " << exe << " [options]\n"
               << "Options:\n"
@@ -47,6 +57,8 @@ void PrintUsage(const char* exe) {
               << "  --tick-rate <hz>           default: 60\n"
               << "  --snapshot-rate <hz>       default: 60\n"
               << "  --small-cubes <count>      default: 180\n"
+              << "  --interest-radius <meters> default: 8, 0 disables distance filter\n"
+              << "  --snapshot-budget <count>  default: 128, 0 disables entity budget\n"
               << "  --help                     show this help\n";
 }
 
@@ -86,6 +98,16 @@ int main(int argc, char** argv) {
         } else if (arg == "--small-cubes") {
             if (!ParseUint32(argv[++i], &config.small_cube_count)) {
                 std::cerr << "无效 small cube 数量\n";
+                return 1;
+            }
+        } else if (arg == "--interest-radius") {
+            if (!ParseDouble(argv[++i], &config.interest_radius_meters)) {
+                std::cerr << "无效 interest radius\n";
+                return 1;
+            }
+        } else if (arg == "--snapshot-budget") {
+            if (!ParseUint32(argv[++i], &config.snapshot_entity_budget)) {
+                std::cerr << "无效 snapshot budget\n";
                 return 1;
             }
         } else {

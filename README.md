@@ -122,6 +122,28 @@ cube、60Hz 的场景下，多数帧只需要 1 个 snapshot chunk；周期性 F
 较多 UDP 包，适合功能验证，不适合长时间公网高频测试。当前 ODE world 允许最多
 `1024` 个 small cube，但云服务器上建议先用 `180` 或 `300` 做短时观察，再逐步加量。
 
+### 兴趣管理和快照优先级
+
+server 默认启用最小兴趣管理：每个客户端始终收到所有 PlayerCube，但 small cube 只发送
+本地 player 附近的一批实体。超过预算时，server 会优先选择距离更近、正在交互、或者
+相对上一帧变化更明显的 cube。这样 `300` 个 cube 的场景不会继续按“全世界全量广播”
+线性增长带宽。
+
+```bash
+# 默认：半径 8m，每个客户端最多 128 个可见实体
+./build/server/xdpg_server --port 40000 --small-cubes 300
+
+# 更省带宽：缩小兴趣半径和实体预算
+./build/server/xdpg_server --port 40000 --small-cubes 300 --interest-radius 6 --snapshot-budget 96
+
+# 对照组：关闭兴趣距离过滤和预算，更接近旧版全量广播
+./build/server/xdpg_server --port 40000 --small-cubes 300 --interest-radius 0 --snapshot-budget 0
+```
+
+当前版本的兴趣管理仍然是实验版：实体离开兴趣范围时，会通过下一次 per-client full
+snapshot 从 viewer 里移除；后续可以继续做 AOI hysteresis、带宽预算按字节计算、
+重要实体可靠重发和分层更新频率。
+
 云服务器测试前，需要在腾讯云防火墙/安全组里放行对应 UDP 端口，例如
 `40000/udp`。如果本地客户端连不上，优先检查云防火墙，再检查 Ubuntu 防火墙。
 
@@ -211,7 +233,7 @@ sudo apt install -y libode-dev
 
 ```powershell
 cmake --build build --config Debug --target xdpg_server
-.\build\server\Debug\xdpg_server.exe --port 40000 --small-cubes 60
+.\build\server\Debug\xdpg_server.exe --port 40000 --small-cubes 300 --interest-radius 6 --snapshot-budget 96
 ```
 
 再另开一个 PowerShell 启动 viewer：

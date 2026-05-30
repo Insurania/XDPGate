@@ -25,6 +25,15 @@ struct DsServerConfig {
     // server 默认和本地 ODE viewer 保持一致：1 个 player + 180 个 small cube。
     // UDP snapshot 通过 chunk 分包发送，避免单包超过 1200 字节。
     std::uint32_t small_cube_count = 180;
+
+    // 兴趣管理半径。每个客户端默认只接收自己 player 附近的 small cube。
+    // 设为 0 可以退回全世界广播，方便做对照实验。
+    double interest_radius_meters = 8.0;
+
+    // 每个客户端一次完整可见 snapshot 的实体预算。玩家实体总是优先保留；
+    // small cube 超出预算时按距离、交互状态和变化情况排序取前 N 个。
+    // 设为 0 表示不限制。
+    std::uint32_t snapshot_entity_budget = 128;
 };
 
 // 最小权威 DS：
@@ -60,6 +69,9 @@ private:
         std::uint64_t client_id = 0;
         std::uint32_t player_entity_id = 0;
         physics::InputCommand latest_input;
+        std::vector<xdpg::EntitySnapshot> previous_snapshot_entities;
+        bool has_previous_snapshot = false;
+        std::uint32_t snapshots_since_full = 0;
     };
 
     void DrainSocket();
@@ -73,12 +85,14 @@ private:
     ClientRecord* RegisterInputClient(const net::Endpoint& endpoint, std::uint64_t client_id);
     void RemoveStaleClients();
     std::vector<xdpg::EntitySnapshot> BuildCurrentSnapshotEntities() const;
-    std::vector<xdpg::EntitySnapshot> BuildSnapshotForClient(
+    std::vector<xdpg::EntitySnapshot> BuildInterestSnapshotForClient(
         const std::vector<xdpg::EntitySnapshot>& entities,
         const ClientRecord& client) const;
     std::vector<xdpg::EntitySnapshot> CollectChangedEntities(
+        const ClientRecord& client,
         const std::vector<xdpg::EntitySnapshot>& current) const;
     xdpg::SnapshotEncodingMode ChooseSnapshotEncoding(
+        const ClientRecord& client,
         const std::vector<xdpg::EntitySnapshot>& current,
         const std::vector<xdpg::EntitySnapshot>& changed) const;
 
@@ -96,9 +110,6 @@ private:
 
     // 发送方向的 packet sequence。它是 server-local 序号，不等同于 input_sequence。
     std::uint32_t outbound_sequence_ = 1;
-    std::vector<xdpg::EntitySnapshot> previous_snapshot_entities_;
-    bool has_previous_snapshot_ = false;
-    std::uint32_t snapshots_since_full_ = 0;
 
     Counters counters_;
     Counters last_logged_counters_;
