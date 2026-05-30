@@ -90,3 +90,22 @@ Ubuntu 22.04 云服务器优先使用系统包：
 sudo apt update
 sudo apt install -y libode-dev
 ```
+
+## 本地 ODE 可视化
+
+当前提供一个本地调试 viewer，用于直接查看项目自己的 ODE world，不走 UDP：
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Debug --target xdpg_ode_world_viewer
+.\build\viewer\ode_world\Debug\xdpg_ode_world_viewer.exe -notex
+```
+
+控制方式：
+
+```text
+W/A/S/D: 切换移动方向
+Space: 切换 boost
+Q 或 Esc: 退出
+鼠标拖动: 调整相机
+```

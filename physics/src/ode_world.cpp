@@ -122,6 +122,7 @@ std::vector<EntityState> OdeWorld::CollectEntityStates() const {
         EntityState state;
         state.entity_id = entity.entity_id;
         state.kind = entity.kind;
+        state.cube_size = entity.half_extent * 2.0;
         state.position = ReadVec3(dBodyGetPosition(entity.body));
         state.rotation = ReadQuat(dBodyGetQuaternion(entity.body));
         state.linear_velocity = ReadVec3(dBodyGetLinearVel(entity.body));

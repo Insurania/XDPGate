@@ -30,6 +30,7 @@ bench/results/
 # outputs are intentionally not tracked in this repository.
 third_party/ode/src/
 third_party/ode/build/
+third_party/ode/build-demos/
 third_party/ode/install/
 
 # Editor and OS files

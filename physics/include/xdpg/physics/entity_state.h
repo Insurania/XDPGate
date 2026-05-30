@@ -26,6 +26,7 @@ struct Quat {
 struct EntityState {
     std::uint32_t entity_id = 0;
     EntityKind kind = EntityKind::SmallCube;
+    double cube_size = 1.0;
     Vec3 position;
     Quat rotation;
     Vec3 linear_velocity;
@@ -33,4 +34,3 @@ struct EntityState {
 };
 
 }  // namespace xdpg::physics
-
