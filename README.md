@@ -42,3 +42,28 @@ protocol encode/decode
 -> benchmark 对比
 ```
 
+## 本地构建和测试
+
+Windows PowerShell：
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+Ubuntu 22.04：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+当前测试目标：
+
+```text
+xdg_protocol_test
+```
+
+它会验证 INPUT、SNAPSHOT 和基础 header validation 的二进制编解码。

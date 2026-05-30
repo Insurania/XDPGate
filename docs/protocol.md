@@ -130,7 +130,7 @@ struct XdgEntitySnapshot {
 };
 ```
 
-Entity record 大小：72 字节。
+Entity record 大小：60 字节。
 
 Entity type：
 
@@ -146,7 +146,7 @@ Entity type：
 Snapshot payload 大小：
 
 ```text
-16 + entity_count * 72
+16 + entity_count * 60
 ```
 
 ## PING Packet
@@ -221,7 +221,7 @@ struct XdgBenchmarkPayload {
 16 个 entity 时：
 
 ```text
-header 16 + snapshot prefix 16 + 16 * 72 = 1184 字节
+header 16 + snapshot prefix 16 + 16 * 60 = 992 字节
 ```
 
 ## 校验规则
@@ -245,4 +245,3 @@ XDP 第一版只检查：
 5. version byte 为 `1`。
 
 XDP 不能解析完整 snapshot 或 input payload。
-
