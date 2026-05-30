@@ -8,8 +8,8 @@ namespace xdpg {
 namespace {
 
 constexpr std::size_t kInputPayloadSize = 32;
-constexpr std::size_t kSnapshotPrefixSize = 16;
-constexpr std::size_t kEntitySnapshotSize = 60;
+constexpr std::size_t kSnapshotPrefixSize = kSnapshotPayloadHeaderSize;
+constexpr std::size_t kEntitySnapshotSize = kEntitySnapshotWireSize;
 constexpr std::size_t kPingPayloadSize = 8;
 constexpr std::size_t kPongPayloadSize = 16;
 
@@ -294,8 +294,14 @@ DecodedInput DecodeInput(const std::uint8_t* data, std::size_t size) {
 }
 
 std::vector<std::uint8_t> EncodeSnapshot(std::uint32_t sequence, const SnapshotPayload& payload) {
-    if (payload.entities.size() > kMaxSnapshotEntities) {
-        throw std::invalid_argument("too many snapshot entities");
+    if (payload.entities.size() > kMaxSnapshotEntitiesPerPacket) {
+        throw std::invalid_argument("too many snapshot entities in one packet");
+    }
+    if (payload.chunk_count == 0 || payload.chunk_index >= payload.chunk_count) {
+        throw std::invalid_argument("invalid snapshot chunk index/count");
+    }
+    if (payload.total_entity_count < payload.entities.size()) {
+        throw std::invalid_argument("invalid snapshot total entity count");
     }
 
     const std::size_t payload_size =
@@ -309,7 +315,11 @@ std::vector<std::uint8_t> EncodeSnapshot(std::uint32_t sequence, const SnapshotP
     WriteHeader(out, PacketType::Snapshot, sequence, CheckedPayloadSize(payload_size));
     WriteU64Le(out, payload.server_tick);
     WriteU32Le(out, payload.last_processed_input_sequence);
+    WriteU16Le(out, payload.chunk_index);
+    WriteU16Le(out, payload.chunk_count);
+    WriteU16Le(out, payload.total_entity_count);
     WriteU16Le(out, static_cast<std::uint16_t>(payload.entities.size()));
+    WriteU16Le(out, 0);
     WriteU16Le(out, 0);
     for (const auto& entity : payload.entities) {
         WriteEntitySnapshot(out, entity);
@@ -334,10 +344,18 @@ DecodedSnapshot DecodeSnapshot(const std::uint8_t* data, std::size_t size) {
     std::size_t offset = kHeaderSize;
     decoded.payload.server_tick = ReadU64Le(data, offset);
     decoded.payload.last_processed_input_sequence = ReadU32Le(data, offset);
+    decoded.payload.chunk_index = ReadU16Le(data, offset);
+    decoded.payload.chunk_count = ReadU16Le(data, offset);
+    decoded.payload.total_entity_count = ReadU16Le(data, offset);
     const auto entity_count = ReadU16Le(data, offset);
-    const auto reserved = ReadU16Le(data, offset);
-    if (reserved != 0 ||
-        entity_count > kMaxSnapshotEntities ||
+    const auto reserved0 = ReadU16Le(data, offset);
+    const auto reserved1 = ReadU16Le(data, offset);
+    if (reserved0 != 0 ||
+        reserved1 != 0 ||
+        entity_count > kMaxSnapshotEntitiesPerPacket ||
+        decoded.payload.chunk_count == 0 ||
+        decoded.payload.chunk_index >= decoded.payload.chunk_count ||
+        decoded.payload.total_entity_count < entity_count ||
         decoded.header.payload_size != kSnapshotPrefixSize + entity_count * kEntitySnapshotSize) {
         decoded.error = DecodeError::InvalidPacketPayload;
         return decoded;

@@ -199,46 +199,58 @@ void DsServer::SendSnapshot() {
         return;
     }
 
-    xdpg::SnapshotPayload snapshot;
-    snapshot.server_tick = world_.tick();
-    snapshot.last_processed_input_sequence = world_.last_processed_input_sequence();
-
     const auto states = world_.CollectEntityStates();
+    const std::size_t total_entities = states.size();
+    const std::size_t max_per_packet = xdpg::kMaxSnapshotEntitiesPerPacket;
+    const std::size_t chunk_count =
+        total_entities == 0 ? 1 : (total_entities + max_per_packet - 1) / max_per_packet;
 
-    // snapshot v1 目标是单 UDP 包稳定传输，因此只发送前 kMaxSnapshotEntities 个。
-    // 当前 world 创建顺序保证 player 在第 0 个，后面是 small cubes。
-    // 大量 entity 后续要通过 chunked snapshot 或区域裁剪解决。
-    const std::size_t count = std::min<std::size_t>(states.size(), xdpg::kMaxSnapshotEntities);
-    snapshot.entities.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const auto& state = states[i];
-        xdpg::EntitySnapshot entity;
-        entity.entity_id = state.entity_id;
-        entity.entity_type = ToProtocolEntityType(state.kind);
-        // interacting flag 让 viewer/client 能区分“普通灰色 cube”和“正在被玩家影响的 cube”。
-        entity.flags = state.is_interacting ? xdpg::kEntityFlagInteracting : 0;
-        entity.position[0] = ToFloat(state.position.x);
-        entity.position[1] = ToFloat(state.position.y);
-        entity.position[2] = ToFloat(state.position.z);
-        entity.rotation[0] = ToFloat(state.rotation.x);
-        entity.rotation[1] = ToFloat(state.rotation.y);
-        entity.rotation[2] = ToFloat(state.rotation.z);
-        entity.rotation[3] = ToFloat(state.rotation.w);
-        entity.linear_velocity[0] = ToFloat(state.linear_velocity.x);
-        entity.linear_velocity[1] = ToFloat(state.linear_velocity.y);
-        entity.linear_velocity[2] = ToFloat(state.linear_velocity.z);
-        entity.angular_velocity[0] = ToFloat(state.angular_velocity.x);
-        entity.angular_velocity[1] = ToFloat(state.angular_velocity.y);
-        entity.angular_velocity[2] = ToFloat(state.angular_velocity.z);
-        snapshot.entities.push_back(entity);
-    }
+    // snapshot chunking：同一个 server_tick 的完整状态会拆成多个 UDP 包。
+    // 每个包仍然小于 1200 字节，viewer/client 通过 chunk_index/chunk_count 重组。
+    for (std::size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+        const std::size_t begin = chunk_index * max_per_packet;
+        const std::size_t end = (begin + max_per_packet < total_entities)
+                                    ? begin + max_per_packet
+                                    : total_entities;
 
-    const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
-    std::string error;
-    if (socket_.Send(packet.data(), packet.size(), latest_client_, &error)) {
-        ++counters_.sent_snapshots;
-    } else {
-        std::cerr << "send SNAPSHOT failed: " << error << '\n';
+        xdpg::SnapshotPayload snapshot;
+        snapshot.server_tick = world_.tick();
+        snapshot.last_processed_input_sequence = world_.last_processed_input_sequence();
+        snapshot.chunk_index = static_cast<std::uint16_t>(chunk_index);
+        snapshot.chunk_count = static_cast<std::uint16_t>(chunk_count);
+        snapshot.total_entity_count = static_cast<std::uint16_t>(total_entities);
+        snapshot.entities.reserve(end - begin);
+
+        for (std::size_t i = begin; i < end; ++i) {
+            const auto& state = states[i];
+            xdpg::EntitySnapshot entity;
+            entity.entity_id = state.entity_id;
+            entity.entity_type = ToProtocolEntityType(state.kind);
+            // interacting flag 让 viewer/client 能区分“普通灰色 cube”和“正在被玩家影响的 cube”。
+            entity.flags = state.is_interacting ? xdpg::kEntityFlagInteracting : 0;
+            entity.position[0] = ToFloat(state.position.x);
+            entity.position[1] = ToFloat(state.position.y);
+            entity.position[2] = ToFloat(state.position.z);
+            entity.rotation[0] = ToFloat(state.rotation.x);
+            entity.rotation[1] = ToFloat(state.rotation.y);
+            entity.rotation[2] = ToFloat(state.rotation.z);
+            entity.rotation[3] = ToFloat(state.rotation.w);
+            entity.linear_velocity[0] = ToFloat(state.linear_velocity.x);
+            entity.linear_velocity[1] = ToFloat(state.linear_velocity.y);
+            entity.linear_velocity[2] = ToFloat(state.linear_velocity.z);
+            entity.angular_velocity[0] = ToFloat(state.angular_velocity.x);
+            entity.angular_velocity[1] = ToFloat(state.angular_velocity.y);
+            entity.angular_velocity[2] = ToFloat(state.angular_velocity.z);
+            snapshot.entities.push_back(entity);
+        }
+
+        const auto packet = xdpg::EncodeSnapshot(outbound_sequence_++, snapshot);
+        std::string error;
+        if (socket_.Send(packet.data(), packet.size(), latest_client_, &error)) {
+            ++counters_.sent_snapshots;
+        } else {
+            std::cerr << "send SNAPSHOT failed: " << error << '\n';
+        }
     }
 }
 

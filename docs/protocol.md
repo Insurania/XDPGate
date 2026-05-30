@@ -109,12 +109,26 @@ Payload 前缀：
 struct XdgSnapshotPayloadHeader {
     uint64_t server_tick;
     uint32_t last_processed_input_sequence;
+    uint16_t chunk_index;
+    uint16_t chunk_count;
+    uint16_t total_entity_count;
     uint16_t entity_count;
-    uint16_t reserved;
+    uint16_t reserved0;
+    uint16_t reserved1;
 };
 ```
 
-大小：16 字节。
+大小：24 字节。
+
+Chunk 字段含义：
+
+- `chunk_index`：当前分片序号，从 0 开始。
+- `chunk_count`：同一个 `server_tick` 的 snapshot 总分片数。
+- `total_entity_count`：完整 snapshot 的 entity 总数。
+- `entity_count`：当前 UDP 包内携带的 entity 数。
+
+同一个 `server_tick` 的所有 chunk 共同组成一帧完整 snapshot。viewer/client 可以先
+缓存分片，收齐后再提交显示；第一版 viewer 也可以按 chunk 增量更新。
 
 随后跟随 `entity_count` 个 entity record：
 
@@ -152,7 +166,7 @@ bit 0 = interacting
 Snapshot payload 大小：
 
 ```text
-16 + entity_count * 60
+24 + entity_count * 60
 ```
 
 ## PING Packet
@@ -219,16 +233,19 @@ struct XdgBenchmarkPayload {
 ```text
 最小 UDP payload: 16 字节
 最大 UDP payload: 1200 字节
-单个 snapshot 最大 entity 数: 16
+单个 snapshot chunk 最大 entity 数: 19
 ```
 
 1200 字节可以比较稳妥地避开常见 MTU 下的 IP 分片。
 
-16 个 entity 时：
+19 个 entity 时：
 
 ```text
-header 16 + snapshot prefix 16 + 16 * 60 = 992 字节
+header 16 + snapshot prefix 24 + 19 * 60 = 1180 字节
 ```
+
+完整 snapshot 可以由多个 chunk 组成。例如 `1 player + 180 small cubes = 181`
+个 entity，大约需要 10 个 UDP packet。
 
 ## 校验规则
 

@@ -50,6 +50,9 @@ void TestSnapshotRoundTrip() {
     xdpg::SnapshotPayload snapshot;
     snapshot.server_tick = 60;
     snapshot.last_processed_input_sequence = 1001;
+    snapshot.chunk_index = 0;
+    snapshot.chunk_count = 1;
+    snapshot.total_entity_count = 2;
 
     xdpg::EntitySnapshot player;
     player.entity_id = 1;
@@ -72,7 +75,7 @@ void TestSnapshotRoundTrip() {
     snapshot.entities.push_back(cube);
 
     const auto packet = xdpg::EncodeSnapshot(8, snapshot);
-    Require(packet.size() == 152, "SNAPSHOT packet size should be 152 bytes");
+    Require(packet.size() == 160, "SNAPSHOT packet size should be 160 bytes");
 
     const auto decoded = xdpg::DecodeSnapshot(packet.data(), packet.size());
     Require(decoded.error == xdpg::DecodeError::None, "SNAPSHOT decode should succeed");
@@ -83,6 +86,9 @@ void TestSnapshotRoundTrip() {
     Require(decoded.payload.last_processed_input_sequence ==
                 snapshot.last_processed_input_sequence,
             "last_processed_input_sequence mismatch");
+    Require(decoded.payload.chunk_index == 0, "snapshot chunk_index mismatch");
+    Require(decoded.payload.chunk_count == 1, "snapshot chunk_count mismatch");
+    Require(decoded.payload.total_entity_count == 2, "snapshot total_entity_count mismatch");
     Require(decoded.payload.entities.size() == 2, "entity count mismatch");
     Require(decoded.payload.entities[0].entity_id == 1, "player entity_id mismatch");
     Require(decoded.payload.entities[0].entity_type == xdpg::EntityType::PlayerCube,

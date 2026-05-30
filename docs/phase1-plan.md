@@ -23,6 +23,7 @@ interpolation 或 reconciliation。
 7. viewer 能接收 snapshot，并渲染 cube 的位置和旋转。
 8. protocol encode/decode 有基础单元测试。
 9. README 说明 Ubuntu 22.04 上如何编译运行。
+10. snapshot 支持 chunk 分包，server 可以发送和本地 viewer 一致的大量 cube。
 
 ## 推荐技术栈
 

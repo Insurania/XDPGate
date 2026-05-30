@@ -46,7 +46,7 @@ void PrintUsage(const char* exe) {
               << "  --port <udp_port>          default: 40000\n"
               << "  --tick-rate <hz>           default: 60\n"
               << "  --snapshot-rate <hz>       default: 20\n"
-              << "  --small-cubes <count>      default: 15, max snapshot v1 entities = 16\n"
+              << "  --small-cubes <count>      default: 180\n"
               << "  --help                     show this help\n";
 }
 
@@ -92,15 +92,6 @@ int main(int argc, char** argv) {
             std::cerr << "未知参数: " << arg << '\n';
             return 1;
         }
-    }
-
-    // 这个限制来自协议 v1 的单包 snapshot 设计，不是 ODE world 本身的限制。
-    // 本地 viewer 可以跑 180 个 cube；网络 server 第一版先避免 UDP 分片。
-    if (config.small_cube_count + 1 > xdpg::kMaxSnapshotEntities) {
-        std::cerr << "当前 snapshot v1 最多发送 " << xdpg::kMaxSnapshotEntities
-                  << " 个 entity。请将 --small-cubes 设置为 "
-                  << (xdpg::kMaxSnapshotEntities - 1) << " 或更小。\n";
-        return 1;
     }
 
     std::signal(SIGINT, HandleSignal);

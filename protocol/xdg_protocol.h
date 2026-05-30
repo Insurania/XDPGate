@@ -13,9 +13,12 @@ constexpr std::uint8_t kVersion = 1;
 constexpr std::uint16_t kHeaderSize = 16;
 
 // snapshot v1 把完整状态控制在一个普通 MTU 以内，避免 IP 分片干扰后续网络实验。
-// 如果需要更多 entity，应通过 chunked snapshot 或区域裁剪扩展协议，而不是直接加大包。
+// 大量 entity 通过多个 snapshot chunk 发送，而不是直接加大单个 UDP 包。
 constexpr std::size_t kMaxUdpPayloadSize = 1200;
-constexpr std::size_t kMaxSnapshotEntities = 16;
+constexpr std::size_t kSnapshotPayloadHeaderSize = 24;
+constexpr std::size_t kEntitySnapshotWireSize = 60;
+constexpr std::size_t kMaxSnapshotEntitiesPerPacket =
+    (kMaxUdpPayloadSize - kHeaderSize - kSnapshotPayloadHeaderSize) / kEntitySnapshotWireSize;
 
 // EntitySnapshot::flags 的 bit 定义。先保留一个 interacting 状态，
 // 用于表达小 cube 正在被玩家碰撞/吸引影响，viewer 可以据此变色。
@@ -88,6 +91,12 @@ struct EntitySnapshot {
 struct SnapshotPayload {
     std::uint64_t server_tick = 0;
     std::uint32_t last_processed_input_sequence = 0;
+
+    // chunk_* 字段描述当前 UDP 包在完整 snapshot 中的位置。
+    // entity_count 表示本包实体数；total_entity_count 表示同一 server_tick 的完整实体数。
+    std::uint16_t chunk_index = 0;
+    std::uint16_t chunk_count = 1;
+    std::uint16_t total_entity_count = 0;
     std::vector<EntitySnapshot> entities;
 };
 

@@ -89,14 +89,21 @@ cmake --build build --target xdpg_server
 ./build/server/xdpg_server --port 40000 --small-cubes 15
 ```
 
-当前 UDP snapshot v1 为了避免分片，最多发送 16 个 entity。server 第一版默认是：
+当前 UDP snapshot v1 使用 chunk 分包。单个 UDP packet 仍控制在 1200 字节以内，
+但完整 snapshot 可以包含更多 entity。server 默认是：
 
 ```text
-1 player cube + 15 small cubes
+1 player cube + 180 small cubes
 ```
 
-本地 ODE viewer 可以显示更多 cube；网络 server 后续会通过 snapshot 分包或 chunked
-snapshot 支持更多 entity。
+如果只想做低带宽远程测试，可以临时降低数量：
+
+```powershell
+.\build\server\Debug\xdpg_server.exe --port 40000 --small-cubes 15
+```
+
+腾讯云轻量服务器只有 5Mbps 带宽。`180` 个 small cube 在 20Hz snapshot 下会产生
+更多 UDP 包，适合功能验证，不适合长时间公网高频测试。
 
 云服务器测试前，需要在腾讯云防火墙/安全组里放行对应 UDP 端口，例如
 `40000/udp`。如果本地客户端连不上，优先检查云防火墙，再检查 Ubuntu 防火墙。

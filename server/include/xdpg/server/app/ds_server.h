@@ -19,9 +19,9 @@ struct DsServerConfig {
     std::uint32_t tick_rate = 60;
     std::uint32_t snapshot_rate = 20;
 
-    // snapshot v1 单包最多 16 个 entity。server 默认 1 个 player + 15 个 small cube，
-    // 避免 UDP payload 超过 1200 字节并触发 IP 分片。
-    std::uint32_t small_cube_count = 15;
+    // server 默认和本地 ODE viewer 保持一致：1 个 player + 180 个 small cube。
+    // UDP snapshot 通过 chunk 分包发送，避免单包超过 1200 字节。
+    std::uint32_t small_cube_count = 180;
 };
 
 // 最小权威 DS：
